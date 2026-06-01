@@ -143,17 +143,15 @@ jobs:
           ' 2>/dev/null || true
         }
 
-        # Append a small note about sandbox/CLI quirks so each caller doesn't repeat them.
-        # The working directory IS writeable (claude is invoked with --add-dir .), so the
-        # model can save the review body to a scratch file and pass it via `--body-file`.
-        # gh CLI rejects comment bodies whose lines start with `#` (anti-injection guard),
-        # so reviews should use `**bold**` headings rather than markdown `#` headings.
+        # Append a small note about sandbox/CLI quirks and the canonical posting command
+        # so each caller doesn't repeat them. The model has historically picked the wrong
+        # gh subcommand (issue comment vs. formal PR review) without explicit instruction.
         FULL_PROMPT="$PROMPT
 
         Runtime notes:
-        - The working directory ($PWD style; e.g. /home/runner/work/<repo>/<repo>) is writeable — feel free to Write a scratch file (e.g. review-body.md) and post via --body-file <file>.
-        - /tmp is NOT writeable; keep scratch files inside the working directory.
-        - gh CLI rejects argument bodies whose lines start with '#' (path-validation guard). Use **bold** for section headings (e.g. **Bug**, **Concern**, **Nit**) and plain '-' bullets, never markdown '# Heading'."
+        - Post the review with: gh pr review <PR-number> --comment --body-file <file>. This lands as a formal PR Review (shows in the Reviews tab). Do NOT use 'gh pr comment' for the rollup — that creates a plain issue comment, which is the wrong UI affordance for a code review.
+        - The working directory (e.g. /home/runner/work/<repo>/<repo>) is writeable — Write a scratch file (e.g. review-body.md) and pass it via --body-file. /tmp is NOT writeable.
+        - gh CLI rejects argument/body content whose lines start with '#' (anti-injection guard). Use **bold** for section headings (e.g. **Bug**, **Concern**, **Nit**) and plain '-' bullets, never markdown '# Heading'."
 
         for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
           echo "::group::Attempt ${attempt}/${MAX_ATTEMPTS}"
