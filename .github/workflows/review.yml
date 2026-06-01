@@ -1,0 +1,182 @@
+name: Claude code review
+
+# Reusable workflow that runs `claude -p` directly with a heartbeat watchdog
+# and inline retries, posting findings as a single rollup PR comment. Designed
+# to be called from a consumer repo's CI workflow via `uses:`.
+#
+# Consumers:
+#   jobs:
+#     code_review:
+#       if: ${{ github.event_name == 'pull_request' }}
+#       uses: degory/ghul-code-review/.github/workflows/review.yml@v1
+#       with:
+#         prompt: |
+#           Review pull request #${{ github.event.pull_request.number }} ...
+#       secrets:
+#         claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+on:
+  workflow_call:
+    inputs:
+      prompt:
+        description: "Full text of the review brief to send claude (-p)."
+        type: string
+        required: true
+      model:
+        description: "Claude model id (passed to --model)."
+        type: string
+        default: claude-opus-4-8
+      allowed-tools:
+        description: "Comma-separated --allowedTools argument."
+        type: string
+        default: "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Glob,Grep"
+      idle-timeout-seconds:
+        description: "Kill claude if its stdout doesn't grow for this many seconds."
+        type: number
+        default: 90
+      max-attempts:
+        description: "Maximum inline retry attempts before giving up."
+        type: number
+        default: 3
+      claude-version:
+        description: "Claude CLI version to install on the runner."
+        type: string
+        default: "2.1.159"
+      job-timeout-minutes:
+        description: "Outer job timeout-minutes (belt-and-braces on top of the idle watchdog)."
+        type: number
+        default: 12
+    secrets:
+      claude-oauth-token:
+        description: "OAuth token for the Claude API (CLAUDE_CODE_OAUTH_TOKEN)."
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    name: Claude review
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.job-timeout-minutes }}
+    # Advisory review — failures are surfaced in the live log, not as a red check.
+    continue-on-error: true
+    env:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude-oauth-token }}
+      GH_TOKEN: ${{ github.token }}
+      PROMPT: ${{ inputs.prompt }}
+      MODEL: ${{ inputs.model }}
+      ALLOWED_TOOLS: ${{ inputs.allowed-tools }}
+      IDLE_TIMEOUT_S: ${{ inputs.idle-timeout-seconds }}
+      MAX_ATTEMPTS: ${{ inputs.max-attempts }}
+      CLAUDE_VERSION: ${{ inputs.claude-version }}
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 1
+
+    - name: Install claude CLI
+      run: |
+        curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_VERSION"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Run review with live progress, heartbeat watchdog, inline retries
+      shell: bash
+      run: |
+        set -uo pipefail
+
+        # Each stream-json event -> one summary line in the live job log.
+        # Raw JSON still goes to the watchdog's file so it can detect silence.
+        progress_filter() {
+          jq -r --unbuffered '
+            def trunc($n): if (.|tostring|length) > $n then (.|tostring)[0:$n] + "…" else (.|tostring) end;
+            def squash: gsub("\\s+"; " ");
+            if .type == "system" and .subtype == "init" then
+              "[init] model=\(.model // "?") tools=\((.tools // []) | length)"
+            elif .type == "system" and .subtype == "thinking_tokens" then
+              "[thinking_raw] \(.estimated_tokens // 0)"
+            elif .type == "system" then
+              "[system/\(.subtype // "?")] " + ((. | del(.type, .subtype, .session_id, .uuid, .parent_tool_use_id) | tostring) | gsub("\\s+"; " ") | .[0:180])
+            elif .type == "assistant" then
+              (.message.content // [] | map(
+                if .type == "text" then
+                  "[text] " + (.text | squash | trunc(180))
+                elif .type == "tool_use" then
+                  "[tool] \(.name) " + ((.input // {} | tostring) | squash | trunc(180))
+                else "[\(.type)]" end
+              ) | .[])
+            elif .type == "user" then
+              (.message.content // [] | map(
+                if .type == "tool_result" then
+                  (.content as $c
+                   | (if ($c | type) == "array" then ($c | map(.text // "") | join(" "))
+                      elif ($c | type) == "string" then $c
+                      else ($c | tostring) end)
+                   | squash | trunc(180)
+                   | "[result] " + .)
+                else "[\(.type)]" end
+              ) | .[])
+            elif .type == "result" then
+              "[done/\(.subtype)] turns=\(.num_turns // "?") cost_usd=\(.total_cost_usd // "?") duration_ms=\(.duration_ms // "?")"
+            else
+              "[\(.type // "?")]"
+            end
+          ' 2>/dev/null || true
+        }
+
+        for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+          echo "::group::Attempt ${attempt}/${MAX_ATTEMPTS}"
+          OUT=$(mktemp)
+
+          claude \
+            --model "$MODEL" \
+            --verbose \
+            --output-format stream-json \
+            --allowedTools "$ALLOWED_TOOLS" \
+            -p "$PROMPT" > "$OUT" 2>&1 &
+          CLAUDE_PID=$!
+
+          # Throttle thinking_tokens to one line per 1000-token milestone.
+          tail -n +1 -F "$OUT" --pid="$CLAUDE_PID" 2>/dev/null \
+            | progress_filter \
+            | awk 'BEGIN{m=1000} /^\[thinking_raw\] / { n=$2+0; if (n>=m) { print "[thinking] " n " tokens"; while(m<=n) m+=1000 } next } { print }' &
+          TAIL_PID=$!
+
+          LAST_SIZE=0
+          IDLE=0
+          IDLE_KILLED=false
+          while kill -0 "$CLAUDE_PID" 2>/dev/null; do
+            sleep 5
+            SIZE=$(stat -c %s "$OUT" 2>/dev/null || echo 0)
+            if [ "$SIZE" = "$LAST_SIZE" ]; then
+              IDLE=$((IDLE + 5))
+              if [ "$IDLE" -ge "$IDLE_TIMEOUT_S" ]; then
+                echo "::warning::no claude stdout for ${IDLE_TIMEOUT_S}s — killing PID ${CLAUDE_PID} and children"
+                pkill -TERM -P "$CLAUDE_PID" 2>/dev/null || true
+                kill -TERM "$CLAUDE_PID" 2>/dev/null || true
+                sleep 2
+                pkill -KILL -P "$CLAUDE_PID" 2>/dev/null || true
+                kill -KILL "$CLAUDE_PID" 2>/dev/null || true
+                IDLE_KILLED=true
+                break
+              fi
+            else
+              IDLE=0
+              LAST_SIZE=$SIZE
+            fi
+          done
+          wait "$CLAUDE_PID" 2>/dev/null; RC=$?
+          wait "$TAIL_PID" 2>/dev/null || true
+          rm -f "$OUT"
+          echo "::endgroup::"
+
+          if [ "$IDLE_KILLED" = "false" ] && [ "$RC" -eq 0 ]; then
+            echo "::notice::review completed on attempt ${attempt}"
+            exit 0
+          fi
+          echo "::warning::attempt ${attempt} failed (rc=${RC}, idle_killed=${IDLE_KILLED})"
+        done
+
+        echo "::error::all ${MAX_ATTEMPTS} attempts failed"
+        exit 1
