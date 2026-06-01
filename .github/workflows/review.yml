@@ -29,7 +29,7 @@ on:
       allowed-tools:
         description: "Comma-separated --allowedTools argument."
         type: string
-        default: "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Glob,Grep"
+        default: "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Read,Write,Glob,Grep"
       idle-timeout-seconds:
         description: "Kill claude if its stdout doesn't grow for this many seconds."
         type: number
@@ -46,10 +46,17 @@ on:
         description: "Outer job timeout-minutes (belt-and-braces on top of the idle watchdog)."
         type: number
         default: 12
+      gh-app-id:
+        description: "Optional GitHub App id. When supplied alongside gh-app-private-key, the review posts under this App's installation identity instead of github-actions[bot]."
+        type: string
+        default: ""
     secrets:
       claude-oauth-token:
         description: "OAuth token for the Claude API (CLAUDE_CODE_OAUTH_TOKEN)."
         required: true
+      gh-app-private-key:
+        description: "Optional PEM-format private key for the GitHub App identified by gh-app-id. Required only if gh-app-id is set."
+        required: false
 
 permissions:
   contents: read
@@ -64,7 +71,6 @@ jobs:
     continue-on-error: true
     env:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude-oauth-token }}
-      GH_TOKEN: ${{ github.token }}
       PROMPT: ${{ inputs.prompt }}
       MODEL: ${{ inputs.model }}
       ALLOWED_TOOLS: ${{ inputs.allowed-tools }}
@@ -76,6 +82,14 @@ jobs:
       with:
         fetch-depth: 1
 
+    - name: Mint App installation token
+      id: app-token
+      if: ${{ inputs.gh-app-id != '' }}
+      uses: actions/create-github-app-token@v2
+      with:
+        app-id: ${{ inputs.gh-app-id }}
+        private-key: ${{ secrets.gh-app-private-key }}
+
     - name: Install claude CLI
       run: |
         curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_VERSION"
@@ -83,6 +97,10 @@ jobs:
 
     - name: Run review with live progress, heartbeat watchdog, inline retries
       shell: bash
+      env:
+        # If the caller passed App credentials, post under the App's installation identity.
+        # Otherwise fall back to the default GITHUB_TOKEN (github-actions[bot]).
+        GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
       run: |
         set -uo pipefail
 
@@ -125,19 +143,17 @@ jobs:
           ' 2>/dev/null || true
         }
 
-        # Append posting-mechanics instructions so each caller doesn't have to repeat them.
-        # claude's runner sandbox blocks file writes (Write tool, Bash redirections to /tmp,
-        # and even redirections inside the working dir). The only reliable way to post the
-        # rollup comment is `gh pr comment` with the body either inline (`--body '...'`)
-        # or via stdin heredoc (`--body-file - <<'EOF'...EOF`). `gh` also refuses comment
-        # bodies whose lines start with `#` (anti-injection guard), so the brief steers
-        # toward `**bold**` for headings instead.
+        # Append a small note about sandbox/CLI quirks so each caller doesn't repeat them.
+        # The working directory IS writeable (claude is invoked with --add-dir .), so the
+        # model can save the review body to a scratch file and pass it via `--body-file`.
+        # gh CLI rejects comment bodies whose lines start with `#` (anti-injection guard),
+        # so reviews should use `**bold**` headings rather than markdown `#` headings.
         FULL_PROMPT="$PROMPT
 
-        Posting mechanics (the runner sandbox is restrictive — do not work around it):
-        - The Write tool is not available; do not try to create a scratch file with Write or with shell redirection.
-        - Post the rollup with: gh pr comment <PR-number> --body-file - <<'EOF'  ...body...  EOF
-        - Avoid lines that start with '#' in the comment body — gh CLI's path-validation guard blocks them. Use **bold** for section headings (e.g. **Bug**, **Concern**, **Nit**) and plain '-' bullets."
+        Runtime notes:
+        - The working directory ($PWD style; e.g. /home/runner/work/<repo>/<repo>) is writeable — feel free to Write a scratch file (e.g. review-body.md) and post via --body-file <file>.
+        - /tmp is NOT writeable; keep scratch files inside the working directory.
+        - gh CLI rejects argument bodies whose lines start with '#' (path-validation guard). Use **bold** for section headings (e.g. **Bug**, **Concern**, **Nit**) and plain '-' bullets, never markdown '# Heading'."
 
         for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
           echo "::group::Attempt ${attempt}/${MAX_ATTEMPTS}"
@@ -147,6 +163,7 @@ jobs:
             --model "$MODEL" \
             --verbose \
             --output-format stream-json \
+            --add-dir "$PWD" \
             --allowedTools "$ALLOWED_TOOLS" \
             -p "$FULL_PROMPT" > "$OUT" 2>&1 &
           CLAUDE_PID=$!
