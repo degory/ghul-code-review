@@ -20,6 +20,9 @@ In a consumer repo, add a job that calls into this workflow:
 jobs:
   code_review:
     if: ${{ github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' }}
+    permissions:
+      contents: read
+      pull-requests: write
     uses: degory/ghul-code-review/.github/workflows/review.yml@v1
     with:
       prompt: |
@@ -32,6 +35,11 @@ jobs:
     secrets:
       claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
+
+The `permissions:` block on the calling job is required: this workflow declares
+`pull-requests: write` so it can post the rollup comment, and the caller must
+grant at least that. Without it, GitHub fails the workflow at validation with
+`The workflow is requesting 'pull-requests: write', but is only allowed 'pull-requests: none'`.
 
 ## Inputs
 
