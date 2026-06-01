@@ -64,7 +64,7 @@ permissions:
 
 jobs:
   review:
-    name: Claude review
+    name: Claude
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.job-timeout-minutes }}
     # Advisory review — failures are surfaced in the live log, not as a red check.
