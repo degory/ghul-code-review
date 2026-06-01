@@ -90,6 +90,25 @@ jobs:
         app-id: ${{ inputs.gh-app-id }}
         private-key: ${{ secrets.gh-app-private-key }}
 
+    - name: Pre-fetch PR context
+      if: github.event_name == 'pull_request'
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        mkdir -p .review-context
+        gh pr diff   "$PR_NUMBER" --repo "$REPO" > .review-context/diff.patch
+        gh pr view   "$PR_NUMBER" --repo "$REPO" \
+          --json number,title,body,baseRefName,headRefName,additions,deletions,changedFiles,author,labels,commits \
+          > .review-context/pr.json
+        gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" > .review-context/comments.json
+        gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews"   > .review-context/reviews.json
+        gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments"  > .review-context/review-comments.json
+        echo "Pre-fetched PR context:"
+        ls -lh .review-context/
+
     - name: Install claude CLI
       run: |
         curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_VERSION"
@@ -149,6 +168,12 @@ jobs:
         FULL_PROMPT="$PROMPT
 
         Runtime notes:
+        - PR context is pre-fetched in ./.review-context/ — use Read (or Grep) on these files instead of refetching with 'gh pr diff' / 'gh pr view' / 'gh api':
+            .review-context/diff.patch          — full unified diff
+            .review-context/pr.json             — PR metadata (title, body, author, base/head refs, file counts, commits, labels)
+            .review-context/comments.json       — top-level issue comments on the PR
+            .review-context/reviews.json        — prior PR reviews (use to acknowledge already-resolved findings, avoid duplicates)
+            .review-context/review-comments.json — prior inline review comments
         - Post the review with: gh pr review <PR-number> --comment --body-file <file>. This lands as a formal PR Review (shows in the Reviews tab). Do NOT use 'gh pr comment' for the rollup — that creates a plain issue comment, which is the wrong UI affordance for a code review.
         - The working directory (e.g. /home/runner/work/<repo>/<repo>) is writeable — Write a scratch file (e.g. review-body.md) and pass it via --body-file. /tmp is NOT writeable.
         - gh CLI rejects argument/body content whose lines start with '#' (anti-injection guard). Use **bold** for section headings (e.g. **Bug**, **Concern**, **Nit**) and plain '-' bullets, never markdown '# Heading'."
