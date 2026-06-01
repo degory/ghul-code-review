@@ -138,9 +138,11 @@ jobs:
           CLAUDE_PID=$!
 
           # Throttle thinking_tokens to one line per 1000-token milestone.
+          # `stdbuf -oL` forces line-buffered stdout on awk — otherwise awk block-buffers
+          # when its stdout is a pipe and the whole live log lands at job-exit.
           tail -n +1 -F "$OUT" --pid="$CLAUDE_PID" 2>/dev/null \
             | progress_filter \
-            | awk 'BEGIN{m=1000} /^\[thinking_raw\] / { n=$2+0; if (n>=m) { print "[thinking] " n " tokens"; while(m<=n) m+=1000 } next } { print }' &
+            | stdbuf -oL awk 'BEGIN{m=1000} /^\[thinking_raw\] / { n=$2+0; if (n>=m) { print "[thinking] " n " tokens"; while(m<=n) m+=1000 } next } { print }' &
           TAIL_PID=$!
 
           LAST_SIZE=0
