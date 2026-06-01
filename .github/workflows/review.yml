@@ -125,6 +125,20 @@ jobs:
           ' 2>/dev/null || true
         }
 
+        # Append posting-mechanics instructions so each caller doesn't have to repeat them.
+        # claude's runner sandbox blocks file writes (Write tool, Bash redirections to /tmp,
+        # and even redirections inside the working dir). The only reliable way to post the
+        # rollup comment is `gh pr comment` with the body either inline (`--body '...'`)
+        # or via stdin heredoc (`--body-file - <<'EOF'...EOF`). `gh` also refuses comment
+        # bodies whose lines start with `#` (anti-injection guard), so the brief steers
+        # toward `**bold**` for headings instead.
+        FULL_PROMPT="$PROMPT
+
+        Posting mechanics (the runner sandbox is restrictive — do not work around it):
+        - The Write tool is not available; do not try to create a scratch file with Write or with shell redirection.
+        - Post the rollup with: gh pr comment <PR-number> --body-file - <<'EOF'  ...body...  EOF
+        - Avoid lines that start with '#' in the comment body — gh CLI's path-validation guard blocks them. Use **bold** for section headings (e.g. **Bug**, **Concern**, **Nit**) and plain '-' bullets."
+
         for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
           echo "::group::Attempt ${attempt}/${MAX_ATTEMPTS}"
           OUT=$(mktemp)
@@ -134,7 +148,7 @@ jobs:
             --verbose \
             --output-format stream-json \
             --allowedTools "$ALLOWED_TOOLS" \
-            -p "$PROMPT" > "$OUT" 2>&1 &
+            -p "$FULL_PROMPT" > "$OUT" 2>&1 &
           CLAUDE_PID=$!
 
           # Throttle thinking_tokens to one line per 1000-token milestone.
