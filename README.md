@@ -1,7 +1,8 @@
 # ghul-code-review
 
 Reusable GitHub Actions workflow that runs Claude Code on a pull request and
-posts review findings as a single rollup PR comment.
+posts the result as a single formal PR review — an approval when the diff is
+clean, or a request-changes review with line-anchored inline findings otherwise.
 
 ## What it does
 
@@ -21,22 +22,25 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: degory/ghul-code-review/.github/workflows/review.yml@v1
+    uses: degory/ghul-code-review/.github/workflows/review.yml@v2
     with:
       prompt: |
         Review pull request #${{ github.event.pull_request.number }} on ${{ github.repository }}.
 
-        Use `gh pr diff ${{ github.event.pull_request.number }}` for the diff.
         Read other files only when surrounding context is needed.
-        Post a single rollup comment via `gh pr comment ${{ github.event.pull_request.number }} --body "..."` organised by severity (Bug / Concern / Nit).
-        If the diff is clean, post a one-line "LGTM".
+        Group findings by severity (Bug / Concern / Nit).
     secrets:
       claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
 
+The workflow owns the posting mechanics — it appends runtime notes to the
+prompt directing the model to approve when clean or post a request-changes
+review with inline findings otherwise, so the caller's `prompt` only needs to
+supply the review brief (what to flag), not how to post it.
+
 The `permissions:` block on the calling job is required: this workflow declares
-`pull-requests: write` so it can post the rollup comment, and the caller must
-grant at least that. Without it, GitHub fails the workflow at validation with
+`pull-requests: write` so it can post the review, and the caller must grant at
+least that. Without it, GitHub fails the workflow at validation with
 `The workflow is requesting 'pull-requests: write', but is only allowed 'pull-requests: none'`.
 
 ## Inputs
@@ -45,7 +49,7 @@ grant at least that. Without it, GitHub fails the workflow at validation with
 |---|---|---|
 | `prompt` | (required) | The full review brief sent via `-p`. |
 | `model` | `claude-opus-4-8` | `--model` argument. |
-| `allowed-tools` | `Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Glob,Grep` | Tool allowlist. |
+| `allowed-tools` | `Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Read,Write,Glob,Grep` | Tool allowlist. |
 | `idle-timeout-seconds` | `90` | Kill `claude` after this many seconds of stdout silence and retry. |
 | `max-attempts` | `3` | Inline retry cap. |
 | `claude-version` | `2.1.159` | Claude CLI version installed on the runner. |
