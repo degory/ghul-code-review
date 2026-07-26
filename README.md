@@ -43,6 +43,22 @@ The `permissions:` block on the calling job is required: this workflow declares
 least that. Without it, GitHub fails the workflow at validation with
 `The workflow is requesting 'pull-requests: write', but is only allowed 'pull-requests: none'`.
 
+## What lives here vs. in the calling repo
+
+The workflow appends runtime notes to every prompt, covering everything that
+does not vary by repo: what PR context is pre-fetched and where, how to post a
+review, that the review runs in parallel with CI and should trust the diff,
+what makes a finding worth raising, source-comment hygiene, PR-description
+shape, and the versioning mechanism.
+
+A calling repo's own brief should therefore carry only what is specific to it:
+what the repo ships, who consumes it, the blast radius of a mistake, the risk
+areas worth extra attention, and what counts as a breaking change there.
+
+Restating any of the shared material in a repo brief is a defect rather than
+redundancy. The brief is read *before* these notes, so a stale copy silently
+overrides the current one.
+
 ## Inputs
 
 | Input | Default | Meaning |
