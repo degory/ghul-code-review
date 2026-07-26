@@ -80,12 +80,11 @@ jobs:
     name: Claude
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.job-timeout-minutes }}
-    # Advisory review. continue-on-error keeps a failure out of the run's
-    # conclusion, but the job's own check run would still report failure, so the
-    # review step exits clean on exhausted attempts and relies on its ::error::
-    # annotation instead. Both are needed: this covers a failure in checkout,
-    # token minting or CLI install, the exit code covers the review itself.
-    continue-on-error: true
+    # The review is part of the merge gate, so a failure here fails the run.
+    # A review that could not be posted leaves the diff unreviewed, which is
+    # not a state to merge from — better to block and re-run than to let it
+    # through on the strength of CI alone. Transient trouble is absorbed by
+    # max-attempts before it ever reaches this point.
     env:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude-oauth-token }}
       PROMPT: ${{ inputs.prompt }}
@@ -309,11 +308,5 @@ jobs:
           echo "::warning::attempt ${attempt} failed (rc=${RC}, idle_killed=${IDLE_KILLED})"
         done
 
-        # Exit clean so the check stays green. The review is advisory: a Claude
-        # outage, a credential problem or an exhausted watchdog says nothing
-        # about the code under review, and a caller cannot restore its own
-        # tolerance because continue-on-error is not a legal key on a job that
-        # calls a reusable workflow. The ::error:: annotation still surfaces on
-        # the run, and the absent approval is itself visible.
         echo "::error::all ${MAX_ATTEMPTS} attempts failed — review not posted"
-        exit 0
+        exit 1
