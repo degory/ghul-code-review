@@ -56,6 +56,7 @@ least that. Without it, GitHub fails the workflow at validation with
 | `job-timeout-minutes` | `12` | Outer wall-clock cap on the whole review job. |
 | `gh-app-id` | `""` | GitHub App id. With `gh-app-private-key`, the review posts under that App's installation identity instead of `github-actions[bot]`. |
 | `ghul-reference` | `false` | Fetch `GHUL.md` from `degory/ghul` main into the workspace root, for repos whose diffs contain ghūl source. |
+| `extra-repositories` | `""` | Additional repository names (same owner) the App token should reach, for prompts that read a file from a sibling repo. The calling repository is always included. |
 
 ## Secrets
 
