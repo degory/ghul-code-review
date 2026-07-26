@@ -226,7 +226,28 @@ jobs:
         - Never use event COMMENT (it does not satisfy branch protection, so the PR sits stuck) and never event APPROVE carrying inline findings (auto-merge can land the PR before the author reads what you flagged). If a finding is worth posting it is REQUEST_CHANGES; if it is not, stay silent and approve. A caveat you would attach to an approval is itself a finding — drop the approval and raise it.
         - Do NOT use 'gh pr comment' — that creates an issue comment, not a review.
         - The working directory (e.g. /home/runner/work/<repo>/<repo>) is writeable — Write the JSON there. /tmp is NOT writeable.
-        - JSON 'body' fields can contain markdown (including '# headings') — the '#'-at-line-start guard only applies to command-line --body arguments, not to file contents POSTed via --input."
+        - JSON 'body' fields can contain markdown (including '# headings') — the '#'-at-line-start guard only applies to command-line --body arguments, not to file contents POSTed via --input.
+
+        What you are reading vs. what CI gates:
+        - You run in parallel with CI, not after it, so its jobs can still be in flight. Whether the diff builds, compiles and passes tests is settled by CI and branch protection before anything merges — that is not your job. Trust the diff as written: do not try to mentally compile it, run tests, or verify reproducibility. Spend your attention on what the test suite cannot catch even when it passes.
+
+        What to say:
+        - Group inline findings by severity: prefix each with **Bug**, **Concern** or **Nit** so severity is scannable. Severity is a reading-order aid; it does not change whether you request changes.
+        - Raise a finding only when it would change what a careful maintainer does. Not style preferences the codebase does not share, not speculative refactors, not restatements of what the diff plainly does, not hypotheticals without a concrete path. Silence on a low-confidence finding beats noise — the job is high-signal feedback, not exhaustive enumeration.
+        - Do not soft-pedal. If a finding is worth saying, say it as a finding; if it is not, stay silent. Closing notes like 'non-blocking, but…', 'minor nit (no action)' or 'consider…' do not fit this workflow, because by the time the author reads them the PR can already have merged.
+        - Docs-only and workflow-only changes get the same scrutiny as code. They ship as permanently as code does, and several repos generate their release notes from the squash-merge message.
+
+        Source comment hygiene:
+        - Comments must stand on their own for a reader who knows the repo but has none of the surrounding context — no PR thread, no issue, no private notes. The default position is no comment; comment where a competent reader would genuinely need context, such as a non-obvious invariant, a subtle ordering requirement, or a workaround whose reason is not visible from the code.
+        - Flag comments that narrate what changed ('new in this branch', 'the fix', 'previously we…'), cite issues or PRs as explanation, justify the code against an earlier attempt, run excessively long, or read as one half of a conversation.
+
+        PR description:
+        - The description becomes the squash-merge commit message and the changelog entry, and ships permanently. Plain '-' bullets under 'Enhancements:' (things a consumer of this repo would notice), 'Bugs fixed:' (describe what was broken; reuse an issue's exact title with '(closes #NNNN)' where there is one), or 'Technical:' (internal changes). At least one section; any can be omitted.
+        - Flag: '## Summary' / '## Test plan' / '## Testing' headings (the description is the summary), marketing tone, defensive prose that pre-empts a reviewer's question rather than recording what changed, local test results ('all tests pass locally' — CI is the proof), a 'Co-authored-by:' trailer in the body (squash-merge appends a deduped one), internal labels ('phase 2 of…', 'predecessor branch', 'option B'), and private or ephemeral references such as internal workplans, chat threads or session URLs. Public sibling-repo references are fine where they convey a real cross-repo dependency.
+
+        Versioning:
+        - Default is patch. A non-patch release is cut by raising the VERSION file in the PR; '#minor'/'#major' markers in the PR body are no-ops, so do not suggest adding them. A workflow_dispatch version input overrides outright, for emergencies.
+        - Flag both directions: a breaking change going out without raising VERSION to a major, new public API without raising it to a minor, and a VERSION raise the change does not merit. What counts as breaking for this particular repo is in its review brief."
 
         for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
           echo "::group::Attempt ${attempt}/${MAX_ATTEMPTS}"
