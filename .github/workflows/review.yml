@@ -222,6 +222,7 @@ jobs:
                   ]
                 }
               One finding per 'comments[]' entry, anchored to the specific line; use 'body' only for cross-cutting commentary that doesn't belong on one line. The default 'side' is RIGHT (the new version of the file); add \"side\": \"LEFT\" only when anchoring to a deletion.
+              Every 'comments[]' entry must anchor to a line that appears in this PR's diff. The endpoint rejects the whole POST with a 422 if any single entry falls outside the diff hunks, discarding every other finding with it — so a finding about code the diff doesn't touch goes in 'body', not on a line.
         - Never use event COMMENT (it does not satisfy branch protection, so the PR sits stuck) and never event APPROVE carrying inline findings (auto-merge can land the PR before the author reads what you flagged). If a finding is worth posting it is REQUEST_CHANGES; if it is not, stay silent and approve. A caveat you would attach to an approval is itself a finding — drop the approval and raise it.
         - Do NOT use 'gh pr comment' — that creates an issue comment, not a review.
         - The working directory (e.g. /home/runner/work/<repo>/<repo>) is writeable — Write the JSON there. /tmp is NOT writeable.
