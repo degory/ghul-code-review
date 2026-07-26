@@ -55,6 +55,10 @@ on:
         description: "Fetch GHUL.md from degory/ghul main into the workspace root, for repos whose diffs contain ghūl source. The prompt can then point the review at it."
         type: boolean
         default: false
+      extra-repositories:
+        description: "Additional repository names (newline- or comma-separated, same owner) the App token should reach, for prompts that read a file from a sibling repo. The calling repository is always included."
+        type: string
+        default: ""
     secrets:
       claude-oauth-token:
         description: "OAuth token for the Claude API (CLAUDE_CODE_OAUTH_TOKEN)."
@@ -94,6 +98,13 @@ jobs:
       with:
         app-id: ${{ inputs.gh-app-id }}
         private-key: ${{ secrets.gh-app-private-key }}
+        # The action scopes the token to the calling repository alone unless
+        # told otherwise, so a prompt that reads from a sibling repo gets a 404
+        # until that repo is named here.
+        owner: ${{ github.repository_owner }}
+        repositories: |
+          ${{ github.event.repository.name }}
+          ${{ inputs.extra-repositories }}
 
     - name: Fetch GHUL.md language reference
       if: ${{ inputs.ghul-reference }}
