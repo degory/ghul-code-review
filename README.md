@@ -54,12 +54,15 @@ least that. Without it, GitHub fails the workflow at validation with
 | `max-attempts` | `3` | Inline retry cap. |
 | `claude-version` | `2.1.159` | Claude CLI version installed on the runner. |
 | `job-timeout-minutes` | `12` | Outer wall-clock cap on the whole review job. |
+| `gh-app-id` | `""` | GitHub App id. With `gh-app-private-key`, the review posts under that App's installation identity instead of `github-actions[bot]`. |
+| `ghul-reference` | `false` | Fetch `GHUL.md` from `degory/ghul` main into the workspace root, for repos whose diffs contain ghūl source. |
 
 ## Secrets
 
 | Secret | Required | Meaning |
 |---|---|---|
 | `claude-oauth-token` | yes | `CLAUDE_CODE_OAUTH_TOKEN` for API auth. |
+| `gh-app-private-key` | no | PEM private key for `gh-app-id`. Required only when that is set. |
 
 ## Live progress
 
