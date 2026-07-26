@@ -1,7 +1,7 @@
 name: Claude code review
 
 # Reusable workflow that runs `claude -p` directly with a heartbeat watchdog
-# and inline retries, posting the result as a single formal PR review
+# and a bounded review budget, posting the result as a single formal PR review
 # (approve when clean, request-changes with inline findings otherwise). Designed
 # to be called from a consumer repo's CI workflow via `uses:`.
 #
@@ -30,19 +30,40 @@ on:
       allowed-tools:
         description: "Comma-separated --allowedTools argument."
         type: string
-        default: "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Read,Write,Glob,Grep"
+        default: "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(date:*),Read,Write,Glob,Grep"
+      disallowed-tools:
+        description: >-
+          Space-separated --disallowedTools argument. allowed-tools is a permission
+          allowlist, not a capability restriction: tools that never prompt stay
+          reachable however narrow it is. A review that fans out to subagents
+          multiplies its own token cost and runs out of wall clock before it posts
+          anything, so the orchestration tools are denied outright.
+        type: string
+        default: "Agent Workflow Task"
       idle-timeout-seconds:
         description: "Kill claude if its stdout doesn't grow for this many seconds."
         type: number
         default: 90
       max-attempts:
-        description: "Maximum inline retry attempts before giving up."
+        description: >-
+          Maximum attempts before giving up. Defaults to 1: a retry re-reads the
+          whole PR from a fresh context, so it competes with the surviving attempts
+          for one shared job budget rather than adding to it. Failing the check and
+          letting a push re-trigger the review is cheaper than a second attempt that
+          gets guillotined mid-flight.
         type: number
-        default: 3
+        default: 1
+      post-findings-after-minutes:
+        description: >-
+          Soft deadline handed to the review as a wall-clock instruction: reach a
+          posted review by this point, whatever depth has been achieved. The outer
+          job timeout is a backstop for a wedged run, not the working budget.
+        type: number
+        default: 4
       claude-version:
         description: "Claude CLI version to install on the runner."
         type: string
-        default: "2.1.159"
+        default: "2.1.220"
       job-timeout-minutes:
         description: "Outer job timeout-minutes (belt-and-braces on top of the idle watchdog)."
         type: number
@@ -83,13 +104,14 @@ jobs:
     # The review is part of the merge gate, so a failure here fails the run.
     # A review that could not be posted leaves the diff unreviewed, which is
     # not a state to merge from — better to block and re-run than to let it
-    # through on the strength of CI alone. Transient trouble is absorbed by
-    # max-attempts before it ever reaches this point.
+    # through on the strength of CI alone.
     env:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude-oauth-token }}
       PROMPT: ${{ inputs.prompt }}
       MODEL: ${{ inputs.model }}
       ALLOWED_TOOLS: ${{ inputs.allowed-tools }}
+      DISALLOWED_TOOLS: ${{ inputs.disallowed-tools }}
+      POST_AFTER_MIN: ${{ inputs.post-findings-after-minutes }}
       IDLE_TIMEOUT_S: ${{ inputs.idle-timeout-seconds }}
       MAX_ATTEMPTS: ${{ inputs.max-attempts }}
       CLAUDE_VERSION: ${{ inputs.claude-version }}
@@ -151,7 +173,7 @@ jobs:
         curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_VERSION"
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-    - name: Run review with live progress, heartbeat watchdog, inline retries
+    - name: Run review with live progress and heartbeat watchdog
       shell: bash
       env:
         # If the caller passed App credentials, post under the App's installation identity.
@@ -199,10 +221,23 @@ jobs:
           ' 2>/dev/null || true
         }
 
+        # An absolute wall-clock deadline, not a duration: elapsed time is otherwise
+        # unobservable from inside the run, which makes any "finish within N minutes"
+        # instruction unactionable. Bash(date:*) is in the default allowlist so the
+        # deadline can actually be checked against the clock.
+        POST_BY=$(date -u -d "+${POST_AFTER_MIN} minutes" +'%H:%M:%SZ')
+        STARTED_AT=$(date -u +'%H:%M:%SZ')
+
         # Append a small note about sandbox/CLI quirks and the canonical posting command
         # so each caller doesn't repeat them. The model has historically picked the wrong
         # gh subcommand (issue comment vs. formal PR review) without explicit instruction.
         FULL_PROMPT="$PROMPT
+
+        Time budget:
+        - This run started at ${STARTED_AT} and must have posted its review by ${POST_BY} (UTC, currently ${POST_AFTER_MIN} minutes). Check the clock with 'date -u' whenever you are unsure how much of it you have used.
+        - That deadline is the working budget, not an emergency stop. The runner kills the job a few minutes later, and a killed run posts nothing at all: no review, a failed check, and a PR blocked on work nobody can read. A shallower review that gets posted beats a deeper one that does not.
+        - Depth is yours to spend against that budget. Read what the diff makes you want to read, then stop and post. If the budget is nearly gone, post what you have — a review covering the changes you did read is a complete review, not a partial one.
+        - Do not delegate to subagents or parallel workers. They are disabled: they multiply token cost, and coordinating them is what exhausts the budget before anything reaches the PR. One reviewer, reading directly.
 
         Runtime notes:
         - PR context is pre-fetched in ./.review-context/ — use Read (or Grep) on these files instead of refetching with 'gh pr diff' / 'gh pr view' / 'gh api':
@@ -237,7 +272,9 @@ jobs:
         What to say:
         - Group inline findings by severity: prefix each with **Bug**, **Concern** or **Nit** so severity is scannable. Severity is a reading-order aid; it does not change whether you request changes.
         - Raise a finding only when it would change what a careful maintainer does. Not style preferences the codebase does not share, not speculative refactors, not restatements of what the diff plainly does, not hypotheticals without a concrete path. Silence on a low-confidence finding beats noise — the job is high-signal feedback, not exhaustive enumeration.
+        - Every finding blocks the PR, so apply that test before writing it down: is this worth holding the merge for until someone fixes it? If yes, raise it. If no, drop it entirely. There is no third outcome — nobody comes back to fix something the review mentioned in passing and merged anyway, so a finding you would not block on is one you should not have spent the words on.
         - Do not soft-pedal. If a finding is worth saying, say it as a finding; if it is not, stay silent. Closing notes like 'non-blocking, but…', 'minor nit (no action)' or 'consider…' do not fit this workflow, because by the time the author reads them the PR can already have merged.
+        - The categories below are what counts as a finding when you meet one, not a checklist to work through or a quota to fill. Read the diff, follow what it makes you curious about, and report what you actually found. A category you had no reason to look into is not a gap in the review, and hunting for something to say under each heading produces exactly the low-value findings the previous points rule out.
         - Docs-only and workflow-only changes get the same scrutiny as code. They ship as permanently as code does, and several repos generate their release notes from the squash-merge message.
 
         Source comment hygiene:
@@ -262,6 +299,7 @@ jobs:
             --output-format stream-json \
             --add-dir "$PWD" \
             --allowedTools "$ALLOWED_TOOLS" \
+            --disallowedTools "$DISALLOWED_TOOLS" \
             -p "$FULL_PROMPT" > "$OUT" 2>&1 &
           CLAUDE_PID=$!
 
@@ -308,5 +346,5 @@ jobs:
           echo "::warning::attempt ${attempt} failed (rc=${RC}, idle_killed=${IDLE_KILLED})"
         done
 
-        echo "::error::all ${MAX_ATTEMPTS} attempts failed — review not posted"
+        echo "::error::review not posted after ${MAX_ATTEMPTS} attempt(s) — failing the check so the diff is not merged unreviewed"
         exit 1

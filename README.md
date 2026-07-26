@@ -8,8 +8,15 @@ clean, or a request-changes review with line-anchored inline findings otherwise.
 
 Calls the `claude` CLI directly with `--output-format stream-json`, parses the
 event stream into one-line summaries that appear live in the GitHub Actions
-log, and retries inline if the process stops producing output. The review
-brief is supplied by the calling workflow.
+log, and kills the process if it stops producing output. The review brief is
+supplied by the calling workflow.
+
+The review runs against a wall-clock budget and a single reviewer. Subagent and
+workflow orchestration tools are denied, because `allowed-tools` is a permission
+allowlist rather than a capability restriction and does not exclude them on its
+own: a review that fans out multiplies its token cost and exhausts the job
+timeout before it posts anything, which leaves the PR blocked on a review nobody
+can read.
 
 ## Usage
 
@@ -65,11 +72,13 @@ overrides the current one.
 |---|---|---|
 | `prompt` | (required) | The full review brief sent via `-p`. |
 | `model` | `claude-opus-4-8` | `--model` argument. |
-| `allowed-tools` | `Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Read,Write,Glob,Grep` | Tool allowlist. |
-| `idle-timeout-seconds` | `90` | Kill `claude` after this many seconds of stdout silence and retry. |
-| `max-attempts` | `3` | Inline retry cap. |
-| `claude-version` | `2.1.159` | Claude CLI version installed on the runner. |
-| `job-timeout-minutes` | `12` | Outer wall-clock cap on the whole review job. |
+| `allowed-tools` | `Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(date:*),Read,Write,Glob,Grep` | Tool allowlist. `Bash(date:*)` lets the review check its budget against the clock. |
+| `disallowed-tools` | `Agent Workflow Task` | Tool denylist. Keeps the review a single reader; see above. |
+| `idle-timeout-seconds` | `90` | Kill `claude` after this many seconds of stdout silence. |
+| `max-attempts` | `1` | Attempt cap. A retry re-reads the PR from a fresh context and competes for the same job budget, so the default is to fail the check and let the next push re-trigger the review. |
+| `post-findings-after-minutes` | `4` | Wall-clock budget given to the review: post by this point, whatever depth was reached. |
+| `claude-version` | `2.1.220` | Claude CLI version installed on the runner. |
+| `job-timeout-minutes` | `12` | Outer cap on the whole job. A backstop for a wedged run, not the working budget — a run that reaches it is killed and posts nothing. |
 | `gh-app-id` | `""` | GitHub App id. With `gh-app-private-key`, the review posts under that App's installation identity instead of `github-actions[bot]`. |
 | `ghul-reference` | `false` | Fetch `GHUL.md` from `degory/ghul` main into the workspace root, for repos whose diffs contain ghūl source. |
 | `style-reference` | `false` | Fetch `STYLE.md` from `degory/ghul-style` main into the workspace root, for repos carrying human-facing prose or example code. Needs `gh-app-id`, and `ghul-style` in `extra-repositories`. |
