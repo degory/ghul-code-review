@@ -51,6 +51,10 @@ on:
         description: "Optional GitHub App id. When supplied alongside gh-app-private-key, the review posts under this App's installation identity instead of github-actions[bot]."
         type: string
         default: ""
+      ghul-reference:
+        description: "Fetch GHUL.md from degory/ghul main into the workspace root, for repos whose diffs contain ghūl source. The prompt can then point the review at it."
+        type: boolean
+        default: false
     secrets:
       claude-oauth-token:
         description: "OAuth token for the Claude API (CLAUDE_CODE_OAUTH_TOKEN)."
@@ -90,6 +94,10 @@ jobs:
       with:
         app-id: ${{ inputs.gh-app-id }}
         private-key: ${{ secrets.gh-app-private-key }}
+
+    - name: Fetch GHUL.md language reference
+      if: ${{ inputs.ghul-reference }}
+      run: curl -fsSL https://raw.githubusercontent.com/degory/ghul/main/GHUL.md -o GHUL.md
 
     - name: Pre-fetch PR context
       if: github.event_name == 'pull_request'
