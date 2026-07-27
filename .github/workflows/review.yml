@@ -30,7 +30,7 @@ on:
       allowed-tools:
         description: "Comma-separated --allowedTools argument."
         type: string
-        default: "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(date:*),Read,Write,Glob,Grep"
+        default: "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(date:*),Bash(git log:*),Bash(wc:*),Read,Write,Glob,Grep"
       disallowed-tools:
         description: >-
           Space-separated --disallowedTools argument. allowed-tools is a permission
@@ -238,6 +238,11 @@ jobs:
         - That deadline is the working budget, not an emergency stop. The runner kills the job a few minutes later, and a killed run posts nothing at all: no review, a failed check, and a PR blocked on work nobody can read. A shallower review that gets posted beats a deeper one that does not.
         - Depth is yours to spend against that budget. Read what the diff makes you want to read, then stop and post. If the budget is nearly gone, post what you have — a review covering the changes you did read is a complete review, not a partial one.
         - Do not delegate to subagents or parallel workers. They are disabled: they multiply token cost, and coordinating them is what exhausts the budget before anything reaches the PR. One reviewer, reading directly.
+
+        Tools:
+        - Read, Grep and Glob are how you read the diff and the tree. Read takes offset and limit, so a large file is a couple of targeted calls rather than a series of overlapping shell slices.
+        - Bash is restricted to 'gh', 'date', 'git log' and 'wc'. Anything else is refused, and nobody is present to approve it: a refused command fails outright, and the attempt costs budget whether or not it runs.
+        - So do not probe for what the shell will accept. If a command is refused, do not retry it, rephrase it, or look for an equivalent that might get through — reach the same conclusion with Read, Grep and Glob, or decide without it and say what you could not check.
 
         Runtime notes:
         - PR context is pre-fetched in ./.review-context/ — use Read (or Grep) on these files instead of refetching with 'gh pr diff' / 'gh pr view' / 'gh api':
