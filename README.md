@@ -18,6 +18,24 @@ own: a review that fans out multiplies its token cost and exhausts the job
 timeout before it posts anything, which leaves the PR blocked on a review nobody
 can read.
 
+## Seeing what a review actually did
+
+An approval is a few characters and says nothing about what was weighed to reach
+it, and the live log truncates every event to 180 characters. So each run also
+produces:
+
+- **A scorecard in the job summary** — duration, turns, tool calls and their
+  names, subagent attempts, refused commands, whether a review was posted, and
+  cost. Written per attempt as it finishes, so a run killed at the job timeout
+  still leaves its numbers behind.
+- **The full event stream as an artifact**, one file per attempt. Token-shaped
+  strings are redacted before upload, because artifacts are not covered by the
+  secret masking that applies to the log.
+
+A healthy run is tens of tool calls over a few minutes. Hundreds of tool calls,
+any subagent attempt, or a run approaching the job timeout is the review
+treating the PR as a programme of work rather than something to read.
+
 ## Usage
 
 In a consumer repo, add a job that calls into this workflow:
@@ -77,6 +95,7 @@ overrides the current one.
 | `idle-timeout-seconds` | `90` | Kill `claude` after this many seconds of stdout silence. |
 | `max-attempts` | `1` | Attempt cap. A retry re-reads the PR from a fresh context and competes for the same job budget, so the default is to fail the check and let the next push re-trigger the review. |
 | `post-findings-after-minutes` | `4` | Wall-clock budget given to the review: post by this point, whatever depth was reached. |
+| `transcript-retention-days` | `14` | Retention for the uploaded transcript. |
 | `claude-version` | `2.1.220` | Claude CLI version installed on the runner. |
 | `job-timeout-minutes` | `12` | Outer cap on the whole job. A backstop for a wedged run, not the working budget — a run that reaches it is killed and posts nothing. |
 | `gh-app-id` | `""` | GitHub App id. With `gh-app-private-key`, the review posts under that App's installation identity instead of `github-actions[bot]`. |

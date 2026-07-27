@@ -60,6 +60,13 @@ on:
           job timeout is a backstop for a wedged run, not the working budget.
         type: number
         default: 4
+      transcript-retention-days:
+        description: >-
+          Retention for the uploaded review transcript. The full event stream carries
+          every file the review read, so it is large and its value decays quickly —
+          long enough to investigate a bad run, not to accumulate.
+        type: number
+        default: 14
       claude-version:
         description: "Claude CLI version to install on the runner."
         type: string
@@ -221,6 +228,40 @@ jobs:
           ' 2>/dev/null || true
         }
 
+        LOG_DIR="${RUNNER_TEMP}/review-logs"
+        mkdir -p "$LOG_DIR"
+
+        # One row per attempt in the job summary, so the shape of a run is readable
+        # without downloading anything. The stream is JSONL with stderr interleaved,
+        # so every line is parsed defensively and unparseable ones are dropped.
+        scorecard() {
+          local attempt=$1 f=$2 rc=$3 idle=$4
+          local j
+          j=$(jq -R 'fromjson? // empty' < "$f" 2>/dev/null | jq -s '.' 2>/dev/null) || j='[]'
+          [ -n "$j" ] || j='[]'
+
+          local q='[.[]|select(.type=="assistant")|.message.content[]?|select(.type=="tool_use")]'
+          local tools names fanout refused posted cost dur turns
+          tools=$(echo "$j"  | jq -r "$q|length")
+          names=$(echo "$j"  | jq -r "$q|map(.name)|group_by(.)|map(\"\(.[0])×\(length)\")|join(\", \")")
+          fanout=$(echo "$j" | jq -r "$q|map(select(.name|test(\"^(Agent|Workflow|Task)\$\")))|length")
+          posted=$(echo "$j" | jq -r "$q|map(select((.input|tostring)|test(\"/reviews|pr review\")))|length")
+          refused=$(echo "$j" | jq -r '[.[]|select(.type=="user")|.message.content[]?|select(.type=="tool_result")|(.content|tostring)|select(test("requires approval|Review dynamic workflow"))]|length')
+          cost=$(echo "$j"   | jq -r '[.[]|select(.type=="result")]|last|.total_cost_usd // "?"')
+          dur=$(echo "$j"    | jq -r '[.[]|select(.type=="result")]|last|.duration_ms // 0')
+          turns=$(echo "$j"  | jq -r '[.[]|select(.type=="result")]|last|.num_turns // "?"')
+
+          if [ "$attempt" = "1" ]; then
+            printf '### Review run\n\n'
+            printf '| attempt | outcome | duration | turns | tool calls | fan-out | refused | posted | cost |\n'
+            printf '|---|---|---|---|---|---|---|---|---|\n'
+          fi
+          printf '| %s | rc=%s%s | %ss | %s | %s | %s | %s | %s | $%s |\n' \
+            "$attempt" "$rc" "$([ "$idle" = "true" ] && echo ' idle-killed')" \
+            "$(( dur / 1000 ))" "$turns" "$tools" "$fanout" "$refused" "$posted" "$cost"
+          [ -n "$names" ] && printf '\n%s\n' "$names"
+        }
+
         # An absolute wall-clock deadline, not a duration: elapsed time is otherwise
         # unobservable from inside the run, which makes any "finish within N minutes"
         # instruction unactionable. Bash(date:*) is in the default allowlist so the
@@ -298,7 +339,11 @@ jobs:
 
         for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
           echo "::group::Attempt ${attempt}/${MAX_ATTEMPTS}"
-          OUT=$(mktemp)
+          # Kept for the artifact rather than discarded: the live log truncates every
+          # event to 180 characters, so the reasoning behind a verdict survives nowhere
+          # else. An approval is four characters and tells you nothing about what was
+          # weighed to reach it.
+          OUT="${LOG_DIR}/stream-attempt-${attempt}.json"
 
           claude \
             --model "$MODEL" \
@@ -343,8 +388,12 @@ jobs:
           done
           wait "$CLAUDE_PID" 2>/dev/null; RC=$?
           wait "$TAIL_PID" 2>/dev/null || true
-          rm -f "$OUT"
           echo "::endgroup::"
+
+          # Written per attempt rather than once at the end: a run the runner kills at
+          # timeout-minutes is the one whose numbers matter most, and it never reaches
+          # the end.
+          scorecard "$attempt" "$OUT" "$RC" "$IDLE_KILLED" >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$IDLE_KILLED" = "false" ] && [ "$RC" -eq 0 ]; then
             echo "::notice::review completed on attempt ${attempt}"
@@ -355,3 +404,29 @@ jobs:
 
         echo "::error::review not posted after ${MAX_ATTEMPTS} attempt(s) — failing the check so the diff is not merged unreviewed"
         exit 1
+
+    # always(), because the runs worth reading are the ones that failed or were
+    # killed. Artifacts are uploaded verbatim and secret masking does not apply to
+    # them the way it does to the log, so anything token-shaped is redacted first.
+    - name: Redact and compress the transcript
+      if: always()
+      shell: bash
+      run: |
+        set -uo pipefail
+        DIR="${RUNNER_TEMP}/review-logs"
+        [ -d "$DIR" ] || { echo "no transcript to upload"; exit 0; }
+        if grep -rlE 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9-]{20,}' "$DIR" >/dev/null 2>&1; then
+          echo "::warning::token-shaped strings found in the transcript — redacting before upload"
+          find "$DIR" -type f -exec sed -i -E 's/gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9-]{20,}/REDACTED/g' {} +
+        fi
+        gzip -9 "$DIR"/*.json 2>/dev/null || true
+        ls -lh "$DIR"
+
+    - name: Upload review transcript
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: review-transcript-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/review-logs/
+        retention-days: ${{ inputs.transcript-retention-days }}
+        if-no-files-found: ignore
