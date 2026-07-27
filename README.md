@@ -72,7 +72,7 @@ overrides the current one.
 |---|---|---|
 | `prompt` | (required) | The full review brief sent via `-p`. |
 | `model` | `claude-opus-4-8` | `--model` argument. |
-| `allowed-tools` | `Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(date:*),Read,Write,Glob,Grep` | Tool allowlist. `Bash(date:*)` lets the review check its budget against the clock. |
+| `allowed-tools` | `Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(date:*),Bash(git log:*),Bash(wc:*),Read,Write,Glob,Grep` | Tool allowlist. Covers what a review legitimately reaches for, because a refused command still costs the attempt and invites a search for a way round it. |
 | `disallowed-tools` | `Agent Workflow Task` | Tool denylist. Keeps the review a single reader; see above. |
 | `idle-timeout-seconds` | `90` | Kill `claude` after this many seconds of stdout silence. |
 | `max-attempts` | `1` | Attempt cap. A retry re-reads the PR from a fresh context and competes for the same job budget, so the default is to fail the check and let the next push re-trigger the review. |
