@@ -84,6 +84,21 @@ Restating any of the shared material in a repo brief is a defect rather than
 redundancy. The brief is read *before* these notes, so a stale copy silently
 overrides the current one.
 
+## Human override
+
+Once a non-bot reviewer has approved a PR — at any point in its history, not
+just its current state — every later run of this workflow skips the automated
+review outright instead of re-running Claude on top of it. This holds even
+across further pushes: nothing re-arms it for that PR.
+
+The mechanism is skipping, not re-approving: the workflow simply doesn't post
+a new review, so the bot's last review stays whatever it already was and can't
+override the human reviewer's still-active approval in the aggregate review
+decision. This relies on the calling repo's branch protection *not* dismissing
+stale approvals on push — if it does, a human approval stops being active as
+soon as the next commit lands, and this check will find it in `reviews.json`'s
+history regardless but the PR will still need a fresh approval to merge.
+
 ## Inputs
 
 | Input | Default | Meaning |
