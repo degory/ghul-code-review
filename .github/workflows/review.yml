@@ -175,12 +175,32 @@ jobs:
         echo "Pre-fetched PR context:"
         ls -lh .review-context/
 
+    # A human reviewer's judgment on this PR takes precedence permanently,
+    # not just until the next push: once anyone who isn't a bot has approved
+    # at any point in the PR's history, every later run skips the automated
+    # review outright rather than re-litigating it. Skipping (not posting a
+    # fresh approval) is what makes this work — the bot's own last review
+    # stays whatever it already was, so it can't override the human
+    # reviewer's still-active approval in the aggregate review decision.
+    - name: Check for a prior human approval
+      id: human_approval
+      if: github.event_name == 'pull_request'
+      run: |
+        set -euo pipefail
+        found=$(jq -r '[.[] | select(.user.type != "Bot" and .state == "APPROVED")] | length > 0' .review-context/reviews.json)
+        echo "found=${found}" >> "$GITHUB_OUTPUT"
+        if [ "$found" = "true" ]; then
+          echo "::notice::a human reviewer has already approved this PR — skipping the automated review"
+        fi
+
     - name: Install claude CLI
+      if: steps.human_approval.outputs.found != 'true'
       run: |
         curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_VERSION"
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Run review with live progress and heartbeat watchdog
+      if: steps.human_approval.outputs.found != 'true'
       shell: bash
       env:
         # If the caller passed App credentials, post under the App's installation identity.
