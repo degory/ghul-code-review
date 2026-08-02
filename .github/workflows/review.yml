@@ -30,10 +30,20 @@ on:
           against; the default uses the alibaba-token-plan Qwen endpoint.
         type: string
         default: alibaba-token-plan/qwen3.8-max-preview
+      runner:
+        description: >-
+          GitHub Actions runner label the review job runs on. A small runner
+          suffices — the job spends its time waiting on the model, not building.
+          Defaults to a small Ubicloud runner, because GitHub's own runners do not
+          always reach the model provider's endpoint.
+        type: string
+        default: ubicloud-standard-2
       idle-timeout-seconds:
-        description: "Kill the reviewer if its stdout doesn't grow for this many seconds."
+        description: >-
+          Kill the reviewer if its stdout doesn't grow for this many seconds. Must
+          comfortably exceed the model's time-to-first-token on a cold start.
         type: number
-        default: 90
+        default: 180
       max-attempts:
         description: >-
           Maximum attempts before giving up. Defaults to 1: a retry re-reads the
@@ -96,7 +106,7 @@ permissions:
 jobs:
   review:
     name: OpenCode
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.job-timeout-minutes }}
     # The review is part of the merge gate, so a failure here fails the run.
     # A review that could not be posted leaves the diff unreviewed, which is
@@ -110,6 +120,9 @@ jobs:
       IDLE_TIMEOUT_S: ${{ inputs.idle-timeout-seconds }}
       MAX_ATTEMPTS: ${{ inputs.max-attempts }}
       OPENCODE_VERSION: ${{ inputs.opencode-version }}
+      # A pinned version is installed below, so the startup auto-update check is just
+      # a network call that can stall a cold start on a runner; skip it.
+      OPENCODE_DISABLE_AUTOUPDATE: "true"
     steps:
     - uses: actions/checkout@v6
       with:
@@ -366,10 +379,16 @@ jobs:
           # to reach its verdict. An approval is four characters and tells you nothing.
           OUT="${LOG_DIR}/stream-attempt-${attempt}.json"
 
+          # --print-logs sends startup and progress logs to stderr, which is
+          # captured in the transcript, so a run that stalls leaves a record of
+          # where it got to; the scorecard's defensive parse drops the non-JSON
+          # log lines.
           opencode run \
             --dir "$PWD" \
             --model "$MODEL" \
             --format json \
+            --print-logs \
+            --log-level INFO \
             --auto \
             -- "$FULL_PROMPT" > "$OUT" 2>&1 &
           OC_PID=$!

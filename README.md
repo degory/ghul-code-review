@@ -112,7 +112,8 @@ history regardless but the PR will still need a fresh approval to merge.
 |---|---|---|
 | `prompt` | (required) | The full review brief. |
 | `model` | `alibaba-token-plan/qwen3.8-max-preview` | `--model` argument, in opencode's `provider/model` form. The provider prefix names the API the `opencode-api-key` secret authenticates against; point it at any openai-compatible provider opencode knows and supply that provider's key. |
-| `idle-timeout-seconds` | `90` | Kill the reviewer after this many seconds of stdout silence. |
+| `runner` | `ubicloud-standard-2` | GitHub Actions runner label the review job runs on. A small runner suffices — the job waits on the model rather than building. Defaults to a small Ubicloud runner; GitHub's own runners don't always reach the model provider's endpoint. |
+| `idle-timeout-seconds` | `180` | Kill the reviewer after this many seconds of stdout silence; must exceed the model's time-to-first-token on a cold start. |
 | `max-attempts` | `1` | Attempt cap. A retry re-reads the PR from a fresh context and competes for the same job budget, so the default is to fail the check and let the next push re-trigger the review. |
 | `post-findings-after-minutes` | `4` | Wall-clock budget given to the review: post by this point, whatever depth was reached. |
 | `transcript-retention-days` | `14` | Retention for the uploaded transcript. |
