@@ -62,7 +62,7 @@ jobs:
       opencode-api-key: ${{ secrets.OPENCODE_API_KEY }}
 ```
 
-The workflow owns the posting mechanics — it appends runtime notes to the
+The workflow owns the posting mechanics — it prepends runtime notes to the
 prompt directing the model to approve when clean or post a request-changes
 review with inline findings otherwise, so the caller's `prompt` only needs to
 supply the review brief (what to flag), not how to post it.
@@ -74,7 +74,7 @@ least that. Without it, GitHub fails the workflow at validation with
 
 ## What lives here vs. in the calling repo
 
-The workflow appends runtime notes to every prompt, covering everything that
+The workflow prepends runtime notes to every prompt, covering everything that
 does not vary by repo: what PR context is pre-fetched and where, how to post a
 review, that the review runs in parallel with CI and should trust the diff,
 what makes a finding worth raising, source-comment hygiene, PR-description
@@ -85,8 +85,11 @@ what the repo ships, who consumes it, the blast radius of a mistake, the risk
 areas worth extra attention, and what counts as a breaking change there.
 
 Restating any of the shared material in a repo brief is a defect rather than
-redundancy. The brief is read *before* these notes, so a stale copy silently
-overrides the current one.
+redundancy. These notes are given *first* and the repo-specific brief second,
+so the review reads the authoritative shared rules before anything the caller
+supplies; a brief should carry only what is specific to its repo. A brief that
+restates shared material is noise at best, and at worst contradicts the live
+rules the review has already been given.
 
 ## Human override
 

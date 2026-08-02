@@ -284,13 +284,16 @@ jobs:
           "websearch": "deny"
         }'
 
-        # Append a small note about sandbox quirks and the canonical posting command
-        # so each caller doesn't repeat them. The model has historically picked the
-        # wrong gh subcommand (issue comment vs. formal PR review) without explicit
-        # instruction.
-        FULL_PROMPT="$PROMPT
-
-        Time budget:
+        # The shared rules every review runs under — sandbox quirks, the canonical
+        # posting command, what counts as a finding, comment and PR-description
+        # hygiene, versioning — go first, then the caller's repo-specific brief.
+        # Shared-first means the review reads the authoritative rules before anything
+        # the caller supplies, so a stale restatement of them in a brief can't silently
+        # stand in for the live text; the brief is expected to carry only what is
+        # specific to its repo. (The model has historically picked the wrong gh
+        # subcommand — issue comment vs. formal PR review — without the explicit
+        # instruction below.)
+        FULL_PROMPT="Time budget:
         - This run started at ${STARTED_AT} and must have posted its review by ${POST_BY} (UTC, currently ${POST_AFTER_MIN} minutes). Check the clock with 'date -u' whenever you are unsure how much of it you have used.
         - That deadline is the working budget, not an emergency stop. The runner kills the job a few minutes later, and a killed run posts nothing at all: no review, a failed check, and a PR blocked on work nobody can read. A shallower review that gets posted beats a deeper one that does not.
         - Depth is yours to spend against that budget. Read what the diff makes you want to read, then stop and post. If the budget is nearly gone, post what you have — a review covering the changes you did read is a complete review, not a partial one.
@@ -351,7 +354,10 @@ jobs:
 
         Versioning:
         - Default is patch. A non-patch release is cut by raising the VERSION file in the PR; '#minor'/'#major' markers in the PR body are no-ops, so do not suggest adding them. A workflow_dispatch version input overrides outright, for emergencies.
-        - Flag both directions: a breaking change going out without raising VERSION to a major, new public API without raising it to a minor, and a VERSION raise the change does not merit. What counts as breaking for this particular repo is in its review brief."
+        - Flag both directions: a breaking change going out without raising VERSION to a major, new public API without raising it to a minor, and a VERSION raise the change does not merit. What counts as breaking for this particular repo is in its review brief.
+
+        Repo-specific review brief:
+        $PROMPT"
 
         for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
           echo "::group::Attempt ${attempt}/${MAX_ATTEMPTS}"
