@@ -6,13 +6,23 @@ name: Code review
 # Designed to be called from a consumer repo's CI workflow via `uses:`.
 #
 # The reviewer is always the Claude Code CLI. Which model actually serves the
-# request is a matter of which provider it points at, chosen by the `provider`
-# input (or the calling repo's CODE_REVIEW_PROVIDER variable, no commit
-# needed): 'anthropic' talks to Anthropic's own API, 'qwen' points the CLI at
-# Alibaba's Qwen Token Plan endpoint, and 'openrouter' at OpenRouter's - both
-# of the latter two speak the native Anthropic Messages protocol, so the same
-# CLI, tool policy and prompt work unmodified against all three; only the base
-# URL, auth token and default model differ.
+# request is a matter of which provider it points at: 'anthropic' talks to
+# Anthropic's own API, 'qwen' points the CLI at Alibaba's Qwen Token Plan
+# endpoint, and 'openrouter' at OpenRouter's - both of the latter two speak
+# the native Anthropic Messages protocol, so the same CLI, tool policy and
+# prompt work unmodified against all three; only the base URL, auth token
+# and default model differ.
+#
+# Provider and model are fleet-wide by default, not per-repo: every run
+# fetches fleet.json from this repo's own main branch (unauthenticated raw
+# fetch, since this repo is public) for the live default `provider` and
+# `tier` ('high'/'medium'/'low', mapped to a concrete model per provider).
+# Editing that one file is what "switch every repo over, I've run out of
+# tokens" means in practice - no per-repo commits or variables. A calling
+# repo can still override provider/tier for itself via the `provider`/`tier`
+# inputs or its own CODE_REVIEW_PROVIDER/CODE_REVIEW_TIER variables, and an
+# explicit `model` always wins outright over tier mapping - but neither is
+# needed for the normal case.
 #
 # Consumers:
 #   jobs:
@@ -40,15 +50,28 @@ on:
           compatible endpoint), or 'openrouter' (OpenRouter's Anthropic-
           compatible endpoint, any catalog model). All three run through the
           same claude CLI - only the base URL, auth token and default model
-          differ. Empty string falls back to the calling repo's
-          CODE_REVIEW_PROVIDER variable, then 'anthropic'.
+          differ. Empty string (the normal case) falls back to the calling
+          repo's CODE_REVIEW_PROVIDER variable, then this repo's own
+          fleet.json (fetched fresh each run - see the notes at the top of
+          this file), then 'anthropic'. Set this input, or the repo variable,
+          only to pin one repo away from the fleet default.
+        type: string
+        default: ""
+      tier:
+        description: >-
+          A provider-independent quality/cost tier - 'high', 'medium' or
+          'low' - mapped to a concrete model by fleet.json's `models` table
+          for whichever provider is active. Empty string falls back to the
+          calling repo's CODE_REVIEW_TIER variable, then fleet.json's own
+          default tier, then 'medium'.
         type: string
         default: ""
       model:
         description: >-
-          Model id passed to --model. Empty string falls back to the calling
-          repo's CODE_REVIEW_MODEL variable, then a per-provider default
-          (claude-opus-5 / qwen3.8-max-preview / z-ai/glm-5.2).
+          Explicit model id passed to --model, bypassing tier mapping
+          entirely. Leave empty (the normal case) to resolve from `tier`
+          instead - this is only for pinning a specific model fleet.json's
+          tier table doesn't cover.
         type: string
         default: ""
       allowed-tools:
@@ -155,8 +178,13 @@ jobs:
     # not a state to merge from — better to block and re-run than to let it
     # through on the strength of CI alone.
     env:
-      PROVIDER: ${{ inputs.provider || vars.CODE_REVIEW_PROVIDER || 'anthropic' }}
-      MODEL_INPUT: ${{ inputs.model || vars.CODE_REVIEW_MODEL }}
+      # Raw, unfallen-back values only - the full anthropic/medium fallback
+      # chain runs in the "Resolve provider, tier and credentials" step below,
+      # because fleet.json (fetched there) sits between the repo-level
+      # override and the hardcoded last resort.
+      PROVIDER_OVERRIDE: ${{ inputs.provider || vars.CODE_REVIEW_PROVIDER }}
+      TIER_OVERRIDE: ${{ inputs.tier || vars.CODE_REVIEW_TIER }}
+      MODEL_OVERRIDE: ${{ inputs.model }}
       PROMPT: ${{ inputs.prompt }}
       ALLOWED_TOOLS: ${{ inputs.allowed-tools }}
       DISALLOWED_TOOLS: ${{ inputs.disallowed-tools }}
@@ -235,16 +263,17 @@ jobs:
           echo "::notice::a human reviewer has already approved this PR — skipping the automated review"
         fi
 
-    # Resolves which credentials and default model the rest of the job uses.
-    # Only the secret the selected provider actually needs is read here, so an
-    # unconfigured provider's empty secret never reaches an env var at all.
-    # Written via $GITHUB_ENV rather than a step `env:` block, because a value
-    # produced here has to reach later steps' real process environment (the
-    # claude CLI itself reads ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN from
-    # there) - the static `${{ env.* }}` expression context does not see
-    # anything written to $GITHUB_ENV at runtime, only values declared in a
-    # workflow/job/step `env:` key.
-    - name: Resolve provider credentials
+    # Resolves the fleet-wide default provider/tier, then which credentials
+    # and concrete model the rest of the job uses. Only the secret the
+    # selected provider actually needs is read here, so an unconfigured
+    # provider's empty secret never reaches an env var at all. Written via
+    # $GITHUB_ENV rather than a step `env:` block, because a value produced
+    # here has to reach later steps' real process environment (the claude CLI
+    # itself reads ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN from there) - the
+    # static `${{ env.* }}` expression context does not see anything written
+    # to $GITHUB_ENV at runtime, only values declared in a workflow/job/step
+    # `env:` key.
+    - name: Resolve provider, tier and credentials
       id: provider
       if: steps.human_approval.outputs.found != 'true'
       env:
@@ -253,31 +282,74 @@ jobs:
         OPENROUTER_AUTH_TOKEN: ${{ secrets.openrouter-auth-token }}
       run: |
         set -euo pipefail
+
+        # Fleet-wide defaults, fetched fresh every run. Unauthenticated raw
+        # fetch works because this repo is public - editing fleet.json on
+        # main and pushing is the single switch that moves every consumer
+        # repo's next review run, with no per-repo commit or variable.
+        FLEET_JSON=$(curl -fsSL --max-time 10 https://raw.githubusercontent.com/degory/ghul-code-review/main/fleet.json 2>/dev/null || true)
+        if [ -z "$FLEET_JSON" ] || ! echo "$FLEET_JSON" | jq -e . >/dev/null 2>&1; then
+          echo "::warning::could not fetch or parse fleet.json - falling back to this workflow's own built-in defaults"
+          FLEET_JSON='{}'
+        fi
+        FLEET_PROVIDER=$(echo "$FLEET_JSON" | jq -r '.provider // empty')
+        FLEET_TIER=$(echo "$FLEET_JSON" | jq -r '.tier // empty')
+
+        PROVIDER="${PROVIDER_OVERRIDE:-${FLEET_PROVIDER:-anthropic}}"
+        TIER="${TIER_OVERRIDE:-${FLEET_TIER:-medium}}"
+
+        # Used only when fleet.json doesn't cover [provider][tier] - a fetch
+        # failure, or a tier name fleet.json hasn't been given a model for.
+        fallback_model() {
+          case "$1:$2" in
+            anthropic:high)    echo claude-opus-5 ;;
+            anthropic:medium)  echo claude-sonnet-5 ;;
+            anthropic:low)     echo claude-haiku-4-5 ;;
+            qwen:high)         echo qwen3.8-max ;;
+            qwen:medium)       echo qwen3.7-max ;;
+            qwen:low)          echo qwen3.6-flash ;;
+            openrouter:high)   echo z-ai/glm-5.2 ;;
+            openrouter:medium) echo z-ai/glm-4.7 ;;
+            openrouter:low)    echo z-ai/glm-4.7-flash ;;
+            *) echo "" ;;
+          esac
+        }
+
+        if [ -n "$MODEL_OVERRIDE" ]; then
+          MODEL="$MODEL_OVERRIDE"
+        else
+          MODEL=$(echo "$FLEET_JSON" | jq -r --arg p "$PROVIDER" --arg t "$TIER" '.models[$p][$t] // empty')
+          [ -n "$MODEL" ] || MODEL=$(fallback_model "$PROVIDER" "$TIER")
+          if [ -z "$MODEL" ]; then
+            echo "::error::no model resolvable for provider=$PROVIDER tier=$TIER - not in fleet.json and no built-in fallback for this tier; use tier 'high'/'medium'/'low' or set 'model' explicitly"
+            exit 1
+          fi
+        fi
+
         case "$PROVIDER" in
           anthropic)
             [ -n "$CLAUDE_OAUTH_TOKEN" ] || { echo "::error::provider resolved to 'anthropic' but the claude-oauth-token secret is empty"; exit 1; }
             echo "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_OAUTH_TOKEN" >> "$GITHUB_ENV"
-            MODEL="${MODEL_INPUT:-claude-opus-5}"
             ;;
           qwen)
             [ -n "$QWEN_AUTH_TOKEN" ] || { echo "::error::provider resolved to 'qwen' but the qwen-auth-token secret is empty"; exit 1; }
             echo "ANTHROPIC_AUTH_TOKEN=$QWEN_AUTH_TOKEN" >> "$GITHUB_ENV"
             echo "ANTHROPIC_BASE_URL=https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic" >> "$GITHUB_ENV"
-            MODEL="${MODEL_INPUT:-qwen3.8-max-preview}"
             ;;
           openrouter)
             [ -n "$OPENROUTER_AUTH_TOKEN" ] || { echo "::error::provider resolved to 'openrouter' but the openrouter-auth-token secret is empty"; exit 1; }
             echo "ANTHROPIC_AUTH_TOKEN=$OPENROUTER_AUTH_TOKEN" >> "$GITHUB_ENV"
             echo "ANTHROPIC_BASE_URL=https://openrouter.ai/api" >> "$GITHUB_ENV"
-            MODEL="${MODEL_INPUT:-z-ai/glm-5.2}"
             ;;
           *)
             echo "::error::unknown provider '$PROVIDER' - expected anthropic, qwen or openrouter"
             exit 1
             ;;
         esac
+        echo "PROVIDER=$PROVIDER" >> "$GITHUB_ENV"
+        echo "TIER=$TIER" >> "$GITHUB_ENV"
         echo "MODEL=$MODEL" >> "$GITHUB_ENV"
-        echo "::notice::code review provider=$PROVIDER model=$MODEL"
+        echo "::notice::code review provider=$PROVIDER tier=$TIER model=$MODEL"
 
     - name: Install claude CLI
       if: steps.human_approval.outputs.found != 'true'
@@ -358,7 +430,7 @@ jobs:
           turns=$(echo "$j"  | jq -r '[.[]|select(.type=="result")]|last|.num_turns // "?"')
 
           if [ "$attempt" = "1" ]; then
-            printf '### Review run (provider=%s model=%s)\n\n' "$PROVIDER" "$MODEL"
+            printf '### Review run (provider=%s tier=%s model=%s)\n\n' "$PROVIDER" "$TIER" "$MODEL"
             printf '| attempt | outcome | duration | turns | tool calls | fan-out | refused | posted | cost |\n'
             printf '|---|---|---|---|---|---|---|---|---|\n'
           fi
