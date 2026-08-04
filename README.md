@@ -47,7 +47,7 @@ unauthenticated raw fetch, since this repo is public — for the live default
 ```json
 {
   "provider": "anthropic",
-  "tier": "high",
+  "tier": "medium",
   "models": {
     "anthropic": { "high": "claude-opus-5", "medium": "claude-sonnet-5", "low": "claude-haiku-4-5" },
     "qwen": { "high": "qwen3.8-max", "medium": "qwen3.7-max", "low": "qwen3.6-flash" },
