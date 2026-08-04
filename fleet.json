@@ -1,7 +1,7 @@
 {
   "_comment": "Fetched fresh by every review run (see review.yml) from this repo's own main branch - editing this file and pushing is the single switch that moves every consumer repo's next review run. No per-repo commit or variable needed. 'provider' and 'tier' are the fleet-wide defaults; 'models' maps each provider's tiers to a concrete --model id.",
   "provider": "anthropic",
-  "tier": "high",
+  "tier": "medium",
   "models": {
     "anthropic": {
       "high": "claude-opus-5",
