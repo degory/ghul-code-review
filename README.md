@@ -28,23 +28,66 @@ anything, which leaves the PR blocked on a review nobody can read.
 
 ## Providers
 
-| `provider` | Endpoint | Auth secret | Default model |
-|---|---|---|---|
-| `anthropic` | Anthropic's own API | `claude-oauth-token` | `claude-opus-5` |
-| `qwen` | Alibaba Qwen Token Plan (Anthropic-compatible) | `qwen-auth-token` | `qwen3.8-max-preview` |
-| `openrouter` | OpenRouter (Anthropic-compatible) | `openrouter-auth-token` | `z-ai/glm-5.2` |
+| `provider` | Endpoint | Auth secret |
+|---|---|---|
+| `anthropic` | Anthropic's own API | `claude-oauth-token` |
+| `qwen` | Alibaba Qwen Token Plan (Anthropic-compatible) | `qwen-auth-token` |
+| `openrouter` | OpenRouter (Anthropic-compatible) | `openrouter-auth-token` |
 
 Only the secret the resolved provider actually needs is read; the other two
-can be absent or empty. Switching providers on an already-onboarded repo is a
-plain variable set, no commit required:
+can be absent or empty.
 
-```sh
-gh variable set CODE_REVIEW_PROVIDER --repo degory/<repo> --body qwen
+## Fleet-wide defaults (`fleet.json`)
+
+Provider and tier are **fleet-wide by default, not per-repo**. Every run
+fetches [`fleet.json`](./fleet.json) from this repo's own `main` branch — an
+unauthenticated raw fetch, since this repo is public — for the live default
+`provider` and `tier`, plus the tier→model mapping for each provider:
+
+```json
+{
+  "provider": "anthropic",
+  "tier": "high",
+  "models": {
+    "anthropic": { "high": "claude-opus-5", "medium": "claude-sonnet-5", "low": "claude-haiku-4-5" },
+    "qwen": { "high": "qwen3.8-max", "medium": "qwen3.7-max", "low": "qwen3.6-flash" },
+    "openrouter": { "high": "z-ai/glm-5.2", "medium": "z-ai/glm-4.7", "low": "z-ai/glm-4.7-flash" }
+  }
+}
 ```
 
-`provider` resolves as: the `provider` input, else the calling repo's
-`CODE_REVIEW_PROVIDER` variable, else `anthropic`. `model` resolves the same
-way against `CODE_REVIEW_MODEL`, then the per-provider default above.
+**Editing this one file and pushing is the switch that moves every consumer
+repo's next review run** — no per-repo commit, no per-repo variable. That's
+the point: "switch everything over, I've run out of tokens on provider X" is
+one edit here, not nine.
+
+`tier` is a provider-independent quality/cost knob (`high` / `medium` / `low`)
+rather than a literal model id, so the same tier concept survives a provider
+switch — `tier: high` means "the best model this provider offers" whichever
+provider is currently active, not a specific model name that stops making
+sense once the provider changes.
+
+Resolution order:
+- `provider`: the `provider` input, else the calling repo's
+  `CODE_REVIEW_PROVIDER` variable, else `fleet.json`'s `provider`, else
+  `anthropic`.
+- `tier`: the `tier` input, else `CODE_REVIEW_TIER`, else `fleet.json`'s
+  `tier`, else `medium`.
+- `model`: the `model` input if set (bypasses tier mapping entirely), else
+  `fleet.json`'s `models[provider][tier]`, else a small built-in fallback
+  table baked into the workflow (used only if the fetch fails, or a tier
+  isn't in `fleet.json`'s table yet).
+
+The per-repo `provider`/`tier` inputs and `CODE_REVIEW_PROVIDER`/
+`CODE_REVIEW_TIER` variables exist to pin one repo away from the fleet
+default (a repo that genuinely needs a different model), not as the normal
+way to configure a repo — the normal case sets nothing and follows
+`fleet.json`.
+
+If the fetch fails (network hiccup, `fleet.json` briefly unparseable), the
+run logs a warning and falls back to the workflow's own built-in
+`anthropic`/`medium` default rather than failing every review across the
+fleet over one bad fetch.
 
 OpenRouter's `~anthropic/claude-*-latest` catalog entries route real Anthropic
 models through OpenRouter's billing instead of Anthropic's, if that's ever
@@ -94,10 +137,11 @@ jobs:
       qwen-auth-token: ${{ secrets.QWEN_AUTH_TOKEN }}
 ```
 
-Passing both secrets (when both are available) is what makes the
-`CODE_REVIEW_PROVIDER` variable switch free — the workflow only reads the one
-the resolved provider needs, so an unused secret sitting there does nothing
-until a variable flip asks for it.
+Passing both secrets (when both are available) is what makes a fleet-wide
+provider switch (edit `fleet.json`, push) free for this repo too — the
+workflow only reads the one the resolved provider needs, so an unused secret
+sitting there does nothing until `fleet.json` (or, rarely, a per-repo
+override) asks for it.
 
 The workflow owns the posting mechanics — it prepends runtime notes to the
 prompt directing the model to approve when clean or post a request-changes
@@ -148,8 +192,9 @@ history regardless but the PR will still need a fresh approval to merge.
 | Input | Default | Meaning |
 |---|---|---|
 | `prompt` | (required) | The full review brief. |
-| `provider` | `""` | `anthropic` / `qwen` / `openrouter`. Empty resolves to the calling repo's `CODE_REVIEW_PROVIDER` variable, then `anthropic`. See 'Providers'. |
-| `model` | `""` | `--model` argument. Empty resolves to the calling repo's `CODE_REVIEW_MODEL` variable, then the resolved provider's default. |
+| `provider` | `""` | `anthropic` / `qwen` / `openrouter`. Empty (the normal case) resolves to `CODE_REVIEW_PROVIDER`, then `fleet.json`, then `anthropic`. See 'Fleet-wide defaults'. |
+| `tier` | `""` | `high` / `medium` / `low`. Empty (the normal case) resolves to `CODE_REVIEW_TIER`, then `fleet.json`, then `medium`. |
+| `model` | `""` | Explicit `--model` override, bypassing tier mapping entirely. Leave empty to resolve from `tier` instead. |
 | `allowed-tools` | `Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(date:*),Bash(git log:*),Bash(wc:*),Read,Write,Glob,Grep` | `--allowedTools` argument. |
 | `disallowed-tools` | `Agent Workflow Task` | `--disallowedTools` argument. Denies subagent fan-out outright — it multiplies token cost and burns the wall-clock budget before anything posts. |
 | `runner` | `ubicloud-standard-2` | GitHub Actions runner label the review job runs on. A small runner suffices — the job waits on the model rather than building. Defaults to a small Ubicloud runner; GitHub's own runners don't always reach the Qwen Token Plan or OpenRouter endpoints. |
@@ -191,8 +236,14 @@ shape are unchanged. Consumer changes:
   `claude-oauth-token` alongside it if the repo has a Claude OAuth token to
   offer. Passing both is what makes provider switching free afterwards.
 - The `model` input is no longer opencode's `provider/model` form — it's a
-  bare model id, resolved against whichever provider is active. Leave it
-  unset to take that provider's default.
+  bare model id, and now an explicit override that bypasses the new `tier`
+  mechanism entirely. Leave it unset (the normal case) and use `tier` (or
+  nothing at all, deferring to `fleet.json`) instead.
+- `provider` and `model`/`tier` are now fleet-wide by default via
+  [`fleet.json`](./fleet.json) on this repo's `main`, not something each
+  consumer sets. See 'Fleet-wide defaults' — nothing to change here unless a
+  repo was pinning a specific `model` value, which now needs to move to
+  `tier` or stay as an explicit `model` override.
 - `opencode-version` is gone, replaced by `claude-version`.
 - `allowed-tools` and `disallowed-tools` are back as inputs (the OpenCode
   driver's `OPENCODE_PERMISSION` config is gone; the Claude CLI use
