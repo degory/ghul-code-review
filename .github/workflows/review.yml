@@ -1,47 +1,83 @@
-name: OpenCode code review
+name: Code review
 
-# Reusable workflow that runs `opencode run` (driving a Qwen model) with an idle
-# watchdog and a bounded review budget, posting the result as a single formal PR
-# review (approve when clean, request-changes with inline findings otherwise).
+# Reusable workflow that runs `claude -p` directly with a heartbeat watchdog
+# and a bounded review budget, posting the result as a single formal PR review
+# (approve when clean, request-changes with inline findings otherwise).
 # Designed to be called from a consumer repo's CI workflow via `uses:`.
+#
+# The reviewer is always the Claude Code CLI. Which model actually serves the
+# request is a matter of which provider it points at, chosen by the `provider`
+# input (or the calling repo's CODE_REVIEW_PROVIDER variable, no commit
+# needed): 'anthropic' talks to Anthropic's own API, 'qwen' points the CLI at
+# Alibaba's Qwen Token Plan endpoint, and 'openrouter' at OpenRouter's - both
+# of the latter two speak the native Anthropic Messages protocol, so the same
+# CLI, tool policy and prompt work unmodified against all three; only the base
+# URL, auth token and default model differ.
 #
 # Consumers:
 #   jobs:
 #     code_review:
 #       if: ${{ github.event_name == 'pull_request' }}
-#       uses: degory/ghul-code-review/.github/workflows/review.yml@v3
+#       uses: degory/ghul-code-review/.github/workflows/review.yml@v4
 #       with:
 #         prompt: |
 #           Review pull request #${{ github.event.pull_request.number }} ...
 #       secrets:
-#         opencode-api-key: ${{ secrets.OPENCODE_API_KEY }}
+#         claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+#         qwen-auth-token: ${{ secrets.QWEN_AUTH_TOKEN }}
 
 on:
   workflow_call:
     inputs:
       prompt:
-        description: "Full text of the review brief to send the reviewer."
+        description: "Full text of the review brief to send claude (-p)."
         type: string
         required: true
+      provider:
+        description: >-
+          Which provider serves the review: 'anthropic' (Claude models via
+          Anthropic's own API), 'qwen' (Alibaba's Qwen Token Plan, Anthropic-
+          compatible endpoint), or 'openrouter' (OpenRouter's Anthropic-
+          compatible endpoint, any catalog model). All three run through the
+          same claude CLI - only the base URL, auth token and default model
+          differ. Empty string falls back to the calling repo's
+          CODE_REVIEW_PROVIDER variable, then 'anthropic'.
+        type: string
+        default: ""
       model:
         description: >-
-          Model id in opencode's provider/model form (passed to --model). The
-          provider prefix names the API the opencode-api-key secret authenticates
-          against; the default uses the alibaba-token-plan Qwen endpoint.
+          Model id passed to --model. Empty string falls back to the calling
+          repo's CODE_REVIEW_MODEL variable, then a per-provider default
+          (claude-opus-5 / qwen3.8-max-preview / z-ai/glm-5.2).
         type: string
-        default: alibaba-token-plan/qwen3.8-max-preview
+        default: ""
+      allowed-tools:
+        description: "Comma-separated --allowedTools argument."
+        type: string
+        default: "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(date:*),Bash(git log:*),Bash(wc:*),Read,Write,Glob,Grep"
+      disallowed-tools:
+        description: >-
+          Space-separated --disallowedTools argument. allowed-tools is a permission
+          allowlist, not a capability restriction: tools that never prompt stay
+          reachable however narrow it is. A review that fans out to subagents
+          multiplies its own token cost and runs out of wall clock before it posts
+          anything, so the orchestration tools are denied outright.
+        type: string
+        default: "Agent Workflow Task"
       runner:
         description: >-
           GitHub Actions runner label the review job runs on. A small runner
-          suffices — the job spends its time waiting on the model, not building.
+          suffices - the job spends its time waiting on the model, not building.
           Defaults to a small Ubicloud runner, because GitHub's own runners do not
-          always reach the model provider's endpoint.
+          always reach the Qwen Token Plan or OpenRouter endpoints.
         type: string
         default: ubicloud-standard-2
       idle-timeout-seconds:
         description: >-
-          Kill the reviewer if its stdout doesn't grow for this many seconds. Must
-          comfortably exceed the model's time-to-first-token on a cold start.
+          Kill claude if its stdout doesn't grow for this many seconds. Must
+          comfortably exceed the model's time-to-first-token on a cold start -
+          higher than a direct-Anthropic default needs, because the qwen and
+          openrouter proxies add their own latency.
         type: number
         default: 180
       max-attempts:
@@ -63,14 +99,14 @@ on:
       transcript-retention-days:
         description: >-
           Retention for the uploaded review transcript. The full event stream carries
-          every file the review read, so it is large and its value decays quickly —
+          every file the review read, so it is large and its value decays quickly -
           long enough to investigate a bad run, not to accumulate.
         type: number
         default: 14
-      opencode-version:
-        description: "opencode-ai npm package version to install on the runner."
+      claude-version:
+        description: "Claude CLI version to install on the runner."
         type: string
-        default: "1.18.11"
+        default: "2.1.221"
       job-timeout-minutes:
         description: "Outer job timeout-minutes (belt-and-braces on top of the idle watchdog)."
         type: number
@@ -92,9 +128,15 @@ on:
         type: string
         default: ""
     secrets:
-      opencode-api-key:
-        description: "API key for the model provider named by the model input's provider prefix (default alibaba-token-plan)."
-        required: true
+      claude-oauth-token:
+        description: "OAuth token for Anthropic's own API (CLAUDE_CODE_OAUTH_TOKEN). Required when provider resolves to 'anthropic'."
+        required: false
+      qwen-auth-token:
+        description: "API key for Alibaba's Qwen Token Plan endpoint. Required when provider resolves to 'qwen'."
+        required: false
+      openrouter-auth-token:
+        description: "API key for OpenRouter. Required when provider resolves to 'openrouter'."
+        required: false
       gh-app-private-key:
         description: "Optional PEM-format private key for the GitHub App identified by gh-app-id. Required only if gh-app-id is set."
         required: false
@@ -105,7 +147,7 @@ permissions:
 
 jobs:
   review:
-    name: OpenCode
+    name: Code review
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.job-timeout-minutes }}
     # The review is part of the merge gate, so a failure here fails the run.
@@ -113,16 +155,15 @@ jobs:
     # not a state to merge from — better to block and re-run than to let it
     # through on the strength of CI alone.
     env:
-      OPENCODE_API_KEY: ${{ secrets.opencode-api-key }}
+      PROVIDER: ${{ inputs.provider || vars.CODE_REVIEW_PROVIDER || 'anthropic' }}
+      MODEL_INPUT: ${{ inputs.model || vars.CODE_REVIEW_MODEL }}
       PROMPT: ${{ inputs.prompt }}
-      MODEL: ${{ inputs.model }}
+      ALLOWED_TOOLS: ${{ inputs.allowed-tools }}
+      DISALLOWED_TOOLS: ${{ inputs.disallowed-tools }}
       POST_AFTER_MIN: ${{ inputs.post-findings-after-minutes }}
       IDLE_TIMEOUT_S: ${{ inputs.idle-timeout-seconds }}
       MAX_ATTEMPTS: ${{ inputs.max-attempts }}
-      OPENCODE_VERSION: ${{ inputs.opencode-version }}
-      # A pinned version is installed below, so the startup auto-update check is just
-      # a network call that can stall a cold start on a runner; skip it.
-      OPENCODE_DISABLE_AUTOUPDATE: "true"
+      CLAUDE_VERSION: ${{ inputs.claude-version }}
     steps:
     - uses: actions/checkout@v6
       with:
@@ -148,8 +189,8 @@ jobs:
       run: curl -fsSL https://raw.githubusercontent.com/degory/ghul/main/GHUL.md -o GHUL.md
 
     # ghul-style is private, so this needs the App token widened to reach it.
-    # Doing it here rather than from the prompt because the review's restricted
-    # shell refuses the redirection a prompt-driven fetch would need.
+    # Doing it here rather than from the prompt because the CLI's write guard
+    # refuses the shell redirection a prompt-driven fetch would need.
     - name: Fetch STYLE.md style guide
       if: ${{ inputs.style-reference }}
       env:
@@ -194,27 +235,57 @@ jobs:
           echo "::notice::a human reviewer has already approved this PR — skipping the automated review"
         fi
 
-    - name: Install opencode
+    # Resolves which credentials and default model the rest of the job uses.
+    # Only the secret the selected provider actually needs is read here, so an
+    # unconfigured provider's empty secret never reaches an env var at all.
+    # Written via $GITHUB_ENV rather than a step `env:` block, because a value
+    # produced here has to reach later steps' real process environment (the
+    # claude CLI itself reads ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN from
+    # there) - the static `${{ env.* }}` expression context does not see
+    # anything written to $GITHUB_ENV at runtime, only values declared in a
+    # workflow/job/step `env:` key.
+    - name: Resolve provider credentials
+      id: provider
       if: steps.human_approval.outputs.found != 'true'
-      run: |
-        npm install -g "opencode-ai@${OPENCODE_VERSION}"
-        opencode --version
-
-    # opencode reads provider credentials from ~/.local/share/opencode/auth.json.
-    # The key is filed under the provider prefix of the model id, so a caller that
-    # points `model` at a different openai-compatible provider supplies that
-    # provider's key through the same secret and needs no workflow change.
-    - name: Seed model credentials
-      if: steps.human_approval.outputs.found != 'true'
+      env:
+        CLAUDE_OAUTH_TOKEN: ${{ secrets.claude-oauth-token }}
+        QWEN_AUTH_TOKEN: ${{ secrets.qwen-auth-token }}
+        OPENROUTER_AUTH_TOKEN: ${{ secrets.openrouter-auth-token }}
       run: |
         set -euo pipefail
-        mkdir -p "$HOME/.local/share/opencode"
-        provider="${MODEL%%/*}"
-        jq -n --arg p "$provider" --arg k "$OPENCODE_API_KEY" \
-          '{($p): {type: "api", key: $k}}' > "$HOME/.local/share/opencode/auth.json"
-        chmod 600 "$HOME/.local/share/opencode/auth.json"
+        case "$PROVIDER" in
+          anthropic)
+            [ -n "$CLAUDE_OAUTH_TOKEN" ] || { echo "::error::provider resolved to 'anthropic' but the claude-oauth-token secret is empty"; exit 1; }
+            echo "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_OAUTH_TOKEN" >> "$GITHUB_ENV"
+            MODEL="${MODEL_INPUT:-claude-opus-5}"
+            ;;
+          qwen)
+            [ -n "$QWEN_AUTH_TOKEN" ] || { echo "::error::provider resolved to 'qwen' but the qwen-auth-token secret is empty"; exit 1; }
+            echo "ANTHROPIC_AUTH_TOKEN=$QWEN_AUTH_TOKEN" >> "$GITHUB_ENV"
+            echo "ANTHROPIC_BASE_URL=https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic" >> "$GITHUB_ENV"
+            MODEL="${MODEL_INPUT:-qwen3.8-max-preview}"
+            ;;
+          openrouter)
+            [ -n "$OPENROUTER_AUTH_TOKEN" ] || { echo "::error::provider resolved to 'openrouter' but the openrouter-auth-token secret is empty"; exit 1; }
+            echo "ANTHROPIC_AUTH_TOKEN=$OPENROUTER_AUTH_TOKEN" >> "$GITHUB_ENV"
+            echo "ANTHROPIC_BASE_URL=https://openrouter.ai/api" >> "$GITHUB_ENV"
+            MODEL="${MODEL_INPUT:-z-ai/glm-5.2}"
+            ;;
+          *)
+            echo "::error::unknown provider '$PROVIDER' - expected anthropic, qwen or openrouter"
+            exit 1
+            ;;
+        esac
+        echo "MODEL=$MODEL" >> "$GITHUB_ENV"
+        echo "::notice::code review provider=$PROVIDER model=$MODEL"
 
-    - name: Run review with heartbeat watchdog
+    - name: Install claude CLI
+      if: steps.human_approval.outputs.found != 'true'
+      run: |
+        curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_VERSION"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Run review with live progress and heartbeat watchdog
       if: steps.human_approval.outputs.found != 'true'
       shell: bash
       env:
@@ -224,89 +295,92 @@ jobs:
       run: |
         set -uo pipefail
 
+        # Each stream-json event -> one summary line in the live job log.
+        # Raw JSON still goes to the watchdog's file so it can detect silence.
+        progress_filter() {
+          jq -r --unbuffered '
+            def trunc($n): if (.|tostring|length) > $n then (.|tostring)[0:$n] + "…" else (.|tostring) end;
+            def squash: gsub("\\s+"; " ");
+            if .type == "system" and .subtype == "init" then
+              "[init] model=\(.model // "?") tools=\((.tools // []) | length)"
+            elif .type == "system" and .subtype == "thinking_tokens" then
+              "[thinking_raw] \(.estimated_tokens // 0)"
+            elif .type == "system" then
+              "[system/\(.subtype // "?")] " + ((. | del(.type, .subtype, .session_id, .uuid, .parent_tool_use_id) | tostring) | gsub("\\s+"; " ") | .[0:180])
+            elif .type == "assistant" then
+              (.message.content // [] | map(
+                if .type == "text" then
+                  "[text] " + (.text | squash | trunc(180))
+                elif .type == "tool_use" then
+                  "[tool] \(.name) " + ((.input // {} | tostring) | squash | trunc(180))
+                else "[\(.type)]" end
+              ) | .[])
+            elif .type == "user" then
+              (.message.content // [] | map(
+                if .type == "tool_result" then
+                  (.content as $c
+                   | (if ($c | type) == "array" then ($c | map(.text // "") | join(" "))
+                      elif ($c | type) == "string" then $c
+                      else ($c | tostring) end)
+                   | squash | trunc(180)
+                   | "[result] " + .)
+                else "[\(.type)]" end
+              ) | .[])
+            elif .type == "result" then
+              "[done/\(.subtype)] turns=\(.num_turns // "?") cost_usd=\(.total_cost_usd // "?") duration_ms=\(.duration_ms // "?")"
+            else
+              "[\(.type // "?")]"
+            end
+          ' 2>/dev/null || true
+        }
+
         LOG_DIR="${RUNNER_TEMP}/review-logs"
         mkdir -p "$LOG_DIR"
 
         # One row per attempt in the job summary, so the shape of a run is readable
         # without downloading anything. The stream is JSONL with stderr interleaved,
         # so every line is parsed defensively and unparseable ones are dropped.
-        # opencode emits one event per line: tool calls carry their name, input and
-        # final status directly on the event (.part.tool / .part.state.*), and each
-        # model step closes with a step_finish event.
         scorecard() {
           local attempt=$1 f=$2 rc=$3 idle=$4
           local j
           j=$(jq -R 'fromjson? // empty' < "$f" 2>/dev/null | jq -s '.' 2>/dev/null) || j='[]'
           [ -n "$j" ] || j='[]'
 
-          local q='[.[]|select(.type=="tool_use")]'
-          local tools names fanout refused posted dur turns
+          local q='[.[]|select(.type=="assistant")|.message.content[]?|select(.type=="tool_use")]'
+          local tools names fanout refused posted cost dur turns
           tools=$(echo "$j"  | jq -r "$q|length")
-          names=$(echo "$j"  | jq -r "$q|map(.part.tool)|group_by(.)|map(\"\(.[0])×\(length)\")|join(\", \")")
-          fanout=$(echo "$j" | jq -r "$q|map(select(.part.tool==\"task\"))|length")
-          posted=$(echo "$j" | jq -r "$q|map(select((.part.state.input|tostring)|test(\"/reviews|pr review\")))|length")
-          # A tool call that did not complete (refused by the permission policy or
-          # errored) shows up here; a healthy run against the allowlist reads zero.
-          refused=$(echo "$j" | jq -r "$q|map(select(.part.state.status!=\"completed\"))|length")
-          dur=$(echo "$j"   | jq -r '([.[]|.timestamp]|max // 0) - ([.[]|.timestamp]|min // 0)')
-          turns=$(echo "$j" | jq -r '[.[]|select(.type=="step_finish")]|length')
+          names=$(echo "$j"  | jq -r "$q|map(.name)|group_by(.)|map(\"\(.[0])×\(length)\")|join(\", \")")
+          fanout=$(echo "$j" | jq -r "$q|map(select(.name|test(\"^(Agent|Workflow|Task)\$\")))|length")
+          posted=$(echo "$j" | jq -r "$q|map(select((.input|tostring)|test(\"/reviews|pr review\")))|length")
+          refused=$(echo "$j" | jq -r '[.[]|select(.type=="user")|.message.content[]?|select(.type=="tool_result")|(.content|tostring)|select(test("requires approval|Review dynamic workflow"))]|length')
+          cost=$(echo "$j"   | jq -r '[.[]|select(.type=="result")]|last|.total_cost_usd // "?"')
+          dur=$(echo "$j"    | jq -r '[.[]|select(.type=="result")]|last|.duration_ms // 0')
+          turns=$(echo "$j"  | jq -r '[.[]|select(.type=="result")]|last|.num_turns // "?"')
 
           if [ "$attempt" = "1" ]; then
-            printf '### Review run\n\n'
-            printf '| attempt | outcome | duration | turns | tool calls | fan-out | refused | posted |\n'
-            printf '|---|---|---|---|---|---|---|---|\n'
+            printf '### Review run (provider=%s model=%s)\n\n' "$PROVIDER" "$MODEL"
+            printf '| attempt | outcome | duration | turns | tool calls | fan-out | refused | posted | cost |\n'
+            printf '|---|---|---|---|---|---|---|---|---|\n'
           fi
-          printf '| %s | rc=%s%s | %ss | %s | %s | %s | %s | %s |\n' \
+          printf '| %s | rc=%s%s | %ss | %s | %s | %s | %s | %s | $%s |\n' \
             "$attempt" "$rc" "$([ "$idle" = "true" ] && echo ' idle-killed')" \
-            "$(( dur / 1000 ))" "$turns" "$tools" "$fanout" "$refused" "$posted"
+            "$(( dur / 1000 ))" "$turns" "$tools" "$fanout" "$refused" "$posted" "$cost"
           [ -n "$names" ] && printf '\n%s\n' "$names"
         }
 
         # An absolute wall-clock deadline, not a duration: elapsed time is otherwise
         # unobservable from inside the run, which makes any "finish within N minutes"
-        # instruction unactionable. 'date' is in the bash allowlist so the deadline
-        # can actually be checked against the clock.
+        # instruction unactionable. Bash(date:*) is in the default allowlist so the
+        # deadline can actually be checked against the clock.
         POST_BY=$(date -u -d "+${POST_AFTER_MIN} minutes" +'%H:%M:%SZ')
         STARTED_AT=$(date -u +'%H:%M:%SZ')
 
-        # The tool policy: an allowlist of bash commands plus the read-only file
-        # tools, with subagent and web access denied. opencode runs with --auto, so
-        # anything not explicitly denied is auto-approved and the explicit "deny"
-        # entries are what hold the line — the bash "*" catch-all denies every
-        # command the allowlist does not name.
-        export OPENCODE_PERMISSION='{
-          "bash": {
-            "*": "deny",
-            "gh pr diff *": "allow",
-            "gh pr view *": "allow",
-            "gh pr review": "allow",
-            "gh pr review *": "allow",
-            "gh api *": "allow",
-            "date": "allow",
-            "date *": "allow",
-            "git log": "allow",
-            "git log *": "allow",
-            "wc *": "allow"
-          },
-          "read": "allow",
-          "glob": "allow",
-          "grep": "allow",
-          "edit": "allow",
-          "task": "deny",
-          "webfetch": "deny",
-          "websearch": "deny"
-        }'
+        # Append a small note about sandbox/CLI quirks and the canonical posting command
+        # so each caller doesn't repeat them. The model has historically picked the wrong
+        # gh subcommand (issue comment vs. formal PR review) without explicit instruction.
+        FULL_PROMPT="$PROMPT
 
-        # The shared rules every review runs under — sandbox quirks, the canonical
-        # posting command, what counts as a finding, comment and PR-description
-        # hygiene, versioning — go first, then the caller's repo-specific brief.
-        # Shared-first means the review reads the authoritative rules before anything
-        # the caller supplies, so a stale restatement of them in a brief can't silently
-        # stand in for the live text; the brief is expected to carry only what is
-        # specific to its repo. (The model has historically picked the wrong gh
-        # subcommand — issue comment vs. formal PR review — without the explicit
-        # instruction below.)
-        FULL_PROMPT="Time budget:
+        Time budget:
         - This run started at ${STARTED_AT} and must have posted its review by ${POST_BY} (UTC, currently ${POST_AFTER_MIN} minutes). Check the clock with 'date -u' whenever you are unsure how much of it you have used.
         - That deadline is the working budget, not an emergency stop. The runner kills the job a few minutes later, and a killed run posts nothing at all: no review, a failed check, and a PR blocked on work nobody can read. A shallower review that gets posted beats a deeper one that does not.
         - Depth is yours to spend against that budget. Read what the diff makes you want to read, then stop and post. If the budget is nearly gone, post what you have — a review covering the changes you did read is a complete review, not a partial one.
@@ -367,47 +441,49 @@ jobs:
 
         Versioning:
         - Default is patch. A non-patch release is cut by raising the VERSION file in the PR; '#minor'/'#major' markers in the PR body are no-ops, so do not suggest adding them. A workflow_dispatch version input overrides outright, for emergencies.
-        - Flag both directions: a breaking change going out without raising VERSION to a major, new public API without raising it to a minor, and a VERSION raise the change does not merit. What counts as breaking for this particular repo is in its review brief.
-
-        Repo-specific review brief:
-        $PROMPT"
+        - Flag both directions: a breaking change going out without raising VERSION to a major, new public API without raising it to a minor, and a VERSION raise the change does not merit. What counts as breaking for this particular repo is in its review brief."
 
         for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
           echo "::group::Attempt ${attempt}/${MAX_ATTEMPTS}"
-          # Captured for the artifact: the job log shows only the scorecard, so the
-          # full event stream is the only record of what the review read and weighed
-          # to reach its verdict. An approval is four characters and tells you nothing.
+          # Kept for the artifact rather than discarded: the live log truncates every
+          # event to 180 characters, so the reasoning behind a verdict survives nowhere
+          # else. An approval is four characters and tells you nothing about what was
+          # weighed to reach it.
           OUT="${LOG_DIR}/stream-attempt-${attempt}.json"
 
-          # --print-logs sends startup and progress logs to stderr, which is
-          # captured in the transcript, so a run that stalls leaves a record of
-          # where it got to; the scorecard's defensive parse drops the non-JSON
-          # log lines.
-          opencode run \
-            --dir "$PWD" \
+          claude \
             --model "$MODEL" \
-            --format json \
-            --print-logs \
-            --log-level INFO \
-            --auto \
-            -- "$FULL_PROMPT" > "$OUT" 2>&1 &
-          OC_PID=$!
+            --verbose \
+            --output-format stream-json \
+            --add-dir "$PWD" \
+            --allowedTools "$ALLOWED_TOOLS" \
+            --disallowedTools "$DISALLOWED_TOOLS" \
+            -p "$FULL_PROMPT" > "$OUT" 2>&1 &
+          CLAUDE_PID=$!
+
+          # Throttle thinking_tokens to one line per 1000-token milestone.
+          # `stdbuf -oL` forces line-buffered stdout on awk — otherwise awk block-buffers
+          # when its stdout is a pipe and the whole live log lands at job-exit.
+          tail -n +1 -F "$OUT" --pid="$CLAUDE_PID" 2>/dev/null \
+            | progress_filter \
+            | stdbuf -oL awk 'BEGIN{m=1000} /^\[thinking_raw\] / { n=$2+0; if (n>=m) { print "[thinking] " n " tokens"; while(m<=n) m+=1000 } next } { print }' &
+          TAIL_PID=$!
 
           LAST_SIZE=0
           IDLE=0
           IDLE_KILLED=false
-          while kill -0 "$OC_PID" 2>/dev/null; do
+          while kill -0 "$CLAUDE_PID" 2>/dev/null; do
             sleep 5
             SIZE=$(stat -c %s "$OUT" 2>/dev/null || echo 0)
             if [ "$SIZE" = "$LAST_SIZE" ]; then
               IDLE=$((IDLE + 5))
               if [ "$IDLE" -ge "$IDLE_TIMEOUT_S" ]; then
-                echo "::warning::no opencode stdout for ${IDLE_TIMEOUT_S}s — killing PID ${OC_PID} and children"
-                pkill -TERM -P "$OC_PID" 2>/dev/null || true
-                kill -TERM "$OC_PID" 2>/dev/null || true
+                echo "::warning::no claude stdout for ${IDLE_TIMEOUT_S}s — killing PID ${CLAUDE_PID} and children"
+                pkill -TERM -P "$CLAUDE_PID" 2>/dev/null || true
+                kill -TERM "$CLAUDE_PID" 2>/dev/null || true
                 sleep 2
-                pkill -KILL -P "$OC_PID" 2>/dev/null || true
-                kill -KILL "$OC_PID" 2>/dev/null || true
+                pkill -KILL -P "$CLAUDE_PID" 2>/dev/null || true
+                kill -KILL "$CLAUDE_PID" 2>/dev/null || true
                 IDLE_KILLED=true
                 break
               fi
@@ -416,7 +492,8 @@ jobs:
               LAST_SIZE=$SIZE
             fi
           done
-          wait "$OC_PID" 2>/dev/null; RC=$?
+          wait "$CLAUDE_PID" 2>/dev/null; RC=$?
+          wait "$TAIL_PID" 2>/dev/null || true
           echo "::endgroup::"
 
           # Written per attempt rather than once at the end: a run the runner kills at
@@ -436,9 +513,11 @@ jobs:
 
     # always(), because the runs worth reading are the ones that failed or were
     # killed. Artifacts are uploaded verbatim and secret masking does not apply to
-    # them the way it does to the log, so the model API key (by its exact value —
-    # its format is provider-specific, so a shape match is unreliable) and any
-    # token-shaped strings are redacted first.
+    # them the way it does to the log, so the provider auth token in use (by its
+    # exact value) and any token-shaped strings are redacted first. The token, if
+    # any, arrived via $GITHUB_ENV in the credential-resolution step, so it is read
+    # here as a plain process env var rather than through the `${{ env.* }}`
+    # expression context (which does not see $GITHUB_ENV writes).
     - name: Redact and compress the transcript
       if: always()
       shell: bash
@@ -446,9 +525,9 @@ jobs:
         set -uo pipefail
         DIR="${RUNNER_TEMP}/review-logs"
         [ -d "$DIR" ] || { echo "no transcript to upload"; exit 0; }
-        if [ -n "$OPENCODE_API_KEY" ]; then
-          REDACT_KEY="$OPENCODE_API_KEY" find "$DIR" -type f \
-            -exec perl -pi -e 's/\Q$ENV{REDACT_KEY}\E/REDACTED/g' {} +
+        REDACT_KEY="${ANTHROPIC_AUTH_TOKEN:-${CLAUDE_CODE_OAUTH_TOKEN:-}}"
+        if [ -n "$REDACT_KEY" ]; then
+          REDACT_KEY="$REDACT_KEY" find "$DIR" -type f -exec perl -pi -e 's/\Q$ENV{REDACT_KEY}\E/REDACTED/g' {} +
         fi
         if grep -rlE 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9-]{20,}' "$DIR" >/dev/null 2>&1; then
           echo "::warning::token-shaped strings found in the transcript — redacting before upload"
