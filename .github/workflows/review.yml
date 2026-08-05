@@ -232,10 +232,32 @@ jobs:
         GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         REPO: ${{ github.repository }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: |
         set -euo pipefail
         mkdir -p .review-context
-        gh pr diff   "$PR_NUMBER" --repo "$REPO" > .review-context/diff.patch
+
+        # GitHub's diff endpoint refuses any diff of more than 300 files, so a
+        # large mechanical change - a mass rename, a sweeping cleanup - would
+        # otherwise fail the whole review rather than be reviewed. The checkout
+        # is the pull request's merge commit, so diffing it against the base
+        # commit reproduces the same changes. The history has to be deepened
+        # first, which is why that is done here and not by checking out in full:
+        # every other review pays for a shallow clone and only this path does
+        # not.
+        if ! gh pr diff "$PR_NUMBER" --repo "$REPO" > .review-context/diff.patch 2>.review-context/diff.err ; then
+          if grep -q "exceeded the maximum number of files" .review-context/diff.err ; then
+            echo "diff exceeds GitHub's 300 file limit; computing it locally"
+            git fetch --quiet --unshallow 2>/dev/null || git fetch --quiet --deepen=2000 2>/dev/null || true
+            git fetch --quiet origin "$BASE_SHA" 2>/dev/null || true
+            git diff "$BASE_SHA" HEAD > .review-context/diff.patch
+          else
+            cat .review-context/diff.err >&2
+            exit 1
+          fi
+        fi
+        rm -f .review-context/diff.err
+
         gh pr view   "$PR_NUMBER" --repo "$REPO" \
           --json number,title,body,baseRefName,headRefName,additions,deletions,changedFiles,author,labels,commits \
           > .review-context/pr.json
