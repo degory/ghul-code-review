@@ -8,10 +8,10 @@ name: Code review
 # The reviewer is always the Claude Code CLI. Which model actually serves the
 # request is a matter of which provider it points at: 'anthropic' talks to
 # Anthropic's own API, 'qwen' points the CLI at Alibaba's Qwen Token Plan
-# endpoint, and 'openrouter' at OpenRouter's - both of the latter two speak
-# the native Anthropic Messages protocol, so the same CLI, tool policy and
-# prompt work unmodified against all three; only the base URL, auth token
-# and default model differ.
+# endpoint, 'openrouter' at OpenRouter's, and 'zai' at Z.AI's GLM Coding Plan -
+# the latter three speak the native Anthropic Messages protocol, so the same
+# CLI, tool policy and prompt work unmodified against all four; only the base
+# URL, auth token and default model differ.
 #
 # Provider and model are fleet-wide by default, not per-repo: every run
 # fetches fleet.json from this repo's own main branch (unauthenticated raw
@@ -48,9 +48,9 @@ on:
           Which provider serves the review: 'anthropic' (Claude models via
           Anthropic's own API), 'qwen' (Alibaba's Qwen Token Plan, Anthropic-
           compatible endpoint), or 'openrouter' (OpenRouter's Anthropic-
-          compatible endpoint, any catalog model). All three run through the
-          same claude CLI - only the base URL, auth token and default model
-          differ. Empty string (the normal case) falls back to the calling
+          compatible endpoint, any catalog model), or 'zai' (Z.AI's GLM Coding
+          Plan). All four run through the same claude CLI - only the base URL,
+          auth token and default model differ. Empty string (the normal case) falls back to the calling
           repo's CODE_REVIEW_PROVIDER variable, then this repo's own
           fleet.json (fetched fresh each run - see the notes at the top of
           this file), then 'anthropic'. Set this input, or the repo variable,
@@ -159,6 +159,9 @@ on:
         required: false
       openrouter-auth-token:
         description: "API key for OpenRouter. Required when provider resolves to 'openrouter'."
+        required: false
+      zai-auth-token:
+        description: "API key for Z.AI's GLM Coding Plan endpoint. Required when provider resolves to 'zai'."
         required: false
       gh-app-private-key:
         description: "Optional PEM-format private key for the GitHub App identified by gh-app-id. Required only if gh-app-id is set."
@@ -302,6 +305,7 @@ jobs:
         CLAUDE_OAUTH_TOKEN: ${{ secrets.claude-oauth-token }}
         QWEN_AUTH_TOKEN: ${{ secrets.qwen-auth-token }}
         OPENROUTER_AUTH_TOKEN: ${{ secrets.openrouter-auth-token }}
+        ZAI_AUTH_TOKEN: ${{ secrets.zai-auth-token }}
       run: |
         set -euo pipefail
 
@@ -333,6 +337,9 @@ jobs:
             openrouter:high)   echo z-ai/glm-5.2 ;;
             openrouter:medium) echo z-ai/glm-4.7 ;;
             openrouter:low)    echo z-ai/glm-4.7-flash ;;
+            zai:high)          echo glm-5.2 ;;
+            zai:medium)        echo glm-5.2 ;;
+            zai:low)           echo glm-4.7 ;;
             *) echo "" ;;
           esac
         }
@@ -363,8 +370,17 @@ jobs:
             echo "ANTHROPIC_AUTH_TOKEN=$OPENROUTER_AUTH_TOKEN" >> "$GITHUB_ENV"
             echo "ANTHROPIC_BASE_URL=https://openrouter.ai/api" >> "$GITHUB_ENV"
             ;;
+          zai)
+            [ -n "$ZAI_AUTH_TOKEN" ] || { echo "::error::provider resolved to 'zai' but the zai-auth-token secret is empty"; exit 1; }
+            echo "ANTHROPIC_AUTH_TOKEN=$ZAI_AUTH_TOKEN" >> "$GITHUB_ENV"
+            echo "ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic" >> "$GITHUB_ENV"
+            # Z.AI's Coding Plan can queue a request far longer than the CLI's
+            # default timeout; without raising it a queued review times out and
+            # loses the turn before the model ever responds.
+            echo "API_TIMEOUT_MS=3000000" >> "$GITHUB_ENV"
+            ;;
           *)
-            echo "::error::unknown provider '$PROVIDER' - expected anthropic, qwen or openrouter"
+            echo "::error::unknown provider '$PROVIDER' - expected anthropic, qwen, openrouter or zai"
             exit 1
             ;;
         esac

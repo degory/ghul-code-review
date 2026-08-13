@@ -33,8 +33,9 @@ anything, which leaves the PR blocked on a review nobody can read.
 | `anthropic` | Anthropic's own API | `claude-oauth-token` |
 | `qwen` | Alibaba Qwen Token Plan (Anthropic-compatible) | `qwen-auth-token` |
 | `openrouter` | OpenRouter (Anthropic-compatible) | `openrouter-auth-token` |
+| `zai` | Z.AI GLM Coding Plan (Anthropic-compatible) | `zai-auth-token` |
 
-Only the secret the resolved provider actually needs is read; the other two
+Only the secret the resolved provider actually needs is read; the other three
 can be absent or empty.
 
 ## Fleet-wide defaults (`fleet.json`)
@@ -51,7 +52,8 @@ unauthenticated raw fetch, since this repo is public — for the live default
   "models": {
     "anthropic": { "high": "claude-opus-5", "medium": "claude-sonnet-5", "low": "claude-haiku-4-5" },
     "qwen": { "high": "qwen3.8-max", "medium": "qwen3.7-max", "low": "qwen3.6-flash" },
-    "openrouter": { "high": "z-ai/glm-5.2", "medium": "z-ai/glm-4.7", "low": "z-ai/glm-4.7-flash" }
+    "openrouter": { "high": "z-ai/glm-5.2", "medium": "z-ai/glm-4.7", "low": "z-ai/glm-4.7-flash" },
+    "zai": { "high": "glm-5.2", "medium": "glm-5.2", "low": "glm-4.7" }
   }
 }
 ```
@@ -192,7 +194,7 @@ history regardless but the PR will still need a fresh approval to merge.
 | Input | Default | Meaning |
 |---|---|---|
 | `prompt` | (required) | The full review brief. |
-| `provider` | `""` | `anthropic` / `qwen` / `openrouter`. Empty (the normal case) resolves to `CODE_REVIEW_PROVIDER`, then `fleet.json`, then `anthropic`. See 'Fleet-wide defaults'. |
+| `provider` | `""` | `anthropic` / `qwen` / `openrouter` / `zai`. Empty (the normal case) resolves to `CODE_REVIEW_PROVIDER`, then `fleet.json`, then `anthropic`. See 'Fleet-wide defaults'. |
 | `tier` | `""` | `high` / `medium` / `low`. Empty (the normal case) resolves to `CODE_REVIEW_TIER`, then `fleet.json`, then `medium`. |
 | `model` | `""` | Explicit `--model` override, bypassing tier mapping entirely. Leave empty to resolve from `tier` instead. |
 | `allowed-tools` | `Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(date:*),Bash(git log:*),Bash(wc:*),Read,Write,Glob,Grep` | `--allowedTools` argument. |
@@ -216,6 +218,7 @@ history regardless but the PR will still need a fresh approval to merge.
 | `claude-oauth-token` | no | OAuth token for Anthropic's own API. Required when the resolved provider is `anthropic`. |
 | `qwen-auth-token` | no | API key for Alibaba's Qwen Token Plan endpoint. Required when the resolved provider is `qwen`. |
 | `openrouter-auth-token` | no | API key for OpenRouter. Required when the resolved provider is `openrouter`. |
+| `zai-auth-token` | no | API key for Z.AI's GLM Coding Plan endpoint. Required when the resolved provider is `zai`. |
 | `gh-app-private-key` | no | PEM private key for `gh-app-id`. Required only when that is set. |
 
 None are individually `required: true` because which one is needed depends on
