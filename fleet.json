@@ -17,6 +17,11 @@
       "high": "z-ai/glm-5.2",
       "medium": "z-ai/glm-4.7",
       "low": "z-ai/glm-4.7-flash"
+    },
+    "zai": {
+      "high": "glm-5.2",
+      "medium": "glm-5.2",
+      "low": "glm-4.7"
     }
   }
 }
