@@ -328,11 +328,13 @@ jobs:
         # Version-pin files only: NuGet central package management, .NET
         # tool manifests, npm manifests and lockfiles, container image build
         # arguments, and project files whose only Renovate-managed content is
-        # a PackageReference/PackageVersion Version attribute. Workflow YAML
-        # is included too - an action version bump is the same shape of
-        # change, and a CODEOWNERS entry on .github/workflows/ (where one
-        # exists) still requires its own review independently of this job.
-        pin_pattern='(^|/)(Directory\.Packages\.props|Directory\.Build\.props|\.config/dotnet-tools\.json|package\.json|package-lock\.json|npm-shrinkwrap\.json|Dockerfile)$|\.(csproj|ghulproj)$|^\.github/workflows/[^/]+\.ya?ml$'
+        # a PackageReference/PackageVersion Version attribute. Deliberately
+        # NOT workflow YAML: an action version bump has the same mechanical
+        # shape, but CODEOWNERS covering .github/workflows/ - the thing that
+        # would otherwise force a human review of it - is a per-repo choice,
+        # not something every repo this fleet reviews is confirmed to have.
+        # Falling through to the full review is the safe default here.
+        pin_pattern='(^|/)(Directory\.Packages\.props|Directory\.Build\.props|\.config/dotnet-tools\.json|package\.json|package-lock\.json|npm-shrinkwrap\.json|Dockerfile)$|\.(csproj|ghulproj)$'
 
         only_pins=true
         while IFS= read -r f; do
