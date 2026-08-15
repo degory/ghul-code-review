@@ -288,26 +288,11 @@ jobs:
           echo "::notice::a human reviewer has already approved this PR — skipping the automated review"
         fi
 
-    # A dependency-only PR from this fleet's own Renovate instance (see
-    # degory/ghul-renovate) is mechanical: version pins moved and nothing
-    # else, and the diff is read for exactly that shape here rather than by
-    # a model. Two independent signals, neither alone reliable: the author
-    # is the shared ghul-coder[bot] identity Renovate and every coding-agent
-    # session both push under (so author alone can't tell them apart), but
-    # Renovate branches always carry the 'renovate/' prefix and Renovate's
-    # own PR-description template always appends a '<!--renovate-debug:...'
-    # marker comment, neither of which a coding-agent session's branches
-    # (always 'ghul-coder/<slug>', never 'renovate/*') or hand-written
-    # descriptions produce. This is deliberately not cryptographic proof of
-    # authorship - Renovate and every agent session share one GitHub App, so
-    # nothing server-side can distinguish them - it trusts the same model
-    # that would otherwise be reviewing the PR to act in good faith outside
-    # this job too, which is the standing trust model for this fleet's only
-    # active contributor. Every file in the diff still has to match the
-    # dependency-pin allowlist below; the moment a diff carries anything
-    # else - a hand-written source fix, a workaround, anything a person or
-    # an agent added on top of Renovate's own commit - it no longer
-    # qualifies and the full review below runs as normal.
+    # A pins-only PR from this fleet's own Renovate instance is approved
+    # here directly rather than by the model. Detection is a heuristic
+    # (author + branch prefix + PR-description marker), not proof - see
+    # degory/ghul#2006. Any file outside the allowlist below falls through
+    # to the full review as normal.
     - name: Check for a mechanical dependency-only change
       id: dependency_only
       if: github.event_name == 'pull_request' && steps.human_approval.outputs.found != 'true'
@@ -325,15 +310,9 @@ jobs:
           looks_like_renovate=true
         fi
 
-        # Version-pin files only: NuGet central package management, .NET
-        # tool manifests, npm manifests and lockfiles, container image build
-        # arguments, and project files whose only Renovate-managed content is
-        # a PackageReference/PackageVersion Version attribute. Deliberately
-        # NOT workflow YAML: an action version bump has the same mechanical
-        # shape, but CODEOWNERS covering .github/workflows/ - the thing that
-        # would otherwise force a human review of it - is a per-repo choice,
-        # not something every repo this fleet reviews is confirmed to have.
-        # Falling through to the full review is the safe default here.
+        # Version-pin files only. Workflow YAML is deliberately excluded -
+        # CODEOWNERS coverage on .github/workflows/ isn't confirmed on every
+        # repo this fleet reviews, so an action bump still gets a full review.
         pin_pattern='(^|/)(Directory\.Packages\.props|Directory\.Build\.props|\.config/dotnet-tools\.json|package\.json|package-lock\.json|npm-shrinkwrap\.json|Dockerfile)$|\.(csproj|ghulproj)$'
 
         only_pins=true
