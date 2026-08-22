@@ -52,7 +52,7 @@ unauthenticated raw fetch, since this repo is public — for the live default
   "models": {
     "anthropic": { "high": "claude-opus-5", "medium": "claude-sonnet-5", "low": "claude-haiku-4-5" },
     "qwen": { "high": "qwen3.8-max", "medium": "qwen3.7-max", "low": "qwen3.6-flash" },
-    "openrouter": { "high": "z-ai/glm-5.2", "medium": "z-ai/glm-4.7", "low": "z-ai/glm-4.7-flash" },
+    "openrouter": { "high": "z-ai/glm-5.3", "medium": "z-ai/glm-4.7", "low": "z-ai/glm-4.7-flash" },
     "zai": { "high": "glm-5.2", "medium": "glm-5.2", "low": "glm-4.7" }
   }
 }

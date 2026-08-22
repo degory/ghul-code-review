@@ -14,7 +14,7 @@
       "low": "qwen3.6-flash"
     },
     "openrouter": {
-      "high": "z-ai/glm-5.2",
+      "high": "z-ai/glm-5.3",
       "medium": "z-ai/glm-4.7",
       "low": "z-ai/glm-4.7-flash"
     },
