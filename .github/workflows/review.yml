@@ -20,9 +20,12 @@ name: Code review
 # Editing that one file is what "switch every repo over, I've run out of
 # tokens" means in practice - no per-repo commits or variables. A calling
 # repo can still override provider/tier for itself via the `provider`/`tier`
-# inputs or its own CODE_REVIEW_PROVIDER/CODE_REVIEW_TIER variables, and an
-# explicit `model` always wins outright over tier mapping - but neither is
-# needed for the normal case.
+# inputs or its own CODE_REVIEW_PROVIDER/CODE_REVIEW_TIER variables, and pin
+# the exact model with the `model` input or its own CODE_REVIEW_MODEL
+# variable: an explicit model always wins outright over tier mapping, so
+# setting the variable rides one specific model through pricing changes, and
+# clearing it drops back to whatever fleet.json maps the current tier to.
+# Neither is needed for the normal case.
 #
 # Consumers:
 #   jobs:
@@ -69,9 +72,10 @@ on:
       model:
         description: >-
           Explicit model id passed to --model, bypassing tier mapping
-          entirely. Leave empty (the normal case) to resolve from `tier`
-          instead - this is only for pinning a specific model fleet.json's
-          tier table doesn't cover.
+          entirely. Empty string falls back to the calling repo's
+          CODE_REVIEW_MODEL variable; when both are empty (the normal case)
+          the model resolves from `tier`. Use this only for pinning a
+          specific model fleet.json's tier table doesn't cover.
         type: string
         default: ""
       allowed-tools:
@@ -187,7 +191,7 @@ jobs:
       # override and the hardcoded last resort.
       PROVIDER_OVERRIDE: ${{ inputs.provider || vars.CODE_REVIEW_PROVIDER }}
       TIER_OVERRIDE: ${{ inputs.tier || vars.CODE_REVIEW_TIER }}
-      MODEL_OVERRIDE: ${{ inputs.model }}
+      MODEL_OVERRIDE: ${{ inputs.model || vars.CODE_REVIEW_MODEL }}
       PROMPT: ${{ inputs.prompt }}
       ALLOWED_TOOLS: ${{ inputs.allowed-tools }}
       DISALLOWED_TOOLS: ${{ inputs.disallowed-tools }}
