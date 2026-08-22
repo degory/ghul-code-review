@@ -76,15 +76,17 @@ Resolution order:
 - `tier`: the `tier` input, else `CODE_REVIEW_TIER`, else `fleet.json`'s
   `tier`, else `medium`.
 - `model`: the `model` input if set (bypasses tier mapping entirely), else
+  the calling repo's `CODE_REVIEW_MODEL` variable if set (same bypass), else
   `fleet.json`'s `models[provider][tier]`, else a small built-in fallback
   table baked into the workflow (used only if the fetch fails, or a tier
   isn't in `fleet.json`'s table yet).
 
-The per-repo `provider`/`tier` inputs and `CODE_REVIEW_PROVIDER`/
-`CODE_REVIEW_TIER` variables exist to pin one repo away from the fleet
-default (a repo that genuinely needs a different model), not as the normal
-way to configure a repo — the normal case sets nothing and follows
-`fleet.json`.
+The per-repo inputs and variables (`provider`/`tier`/`model` and their
+`CODE_REVIEW_*` counterparts) exist to pin one repo away from the fleet
+default: a different provider when a repo has reason to leave the shared
+one, or one specific model while its pricing makes pinning worth it. They
+are not the normal way to configure a repo; the normal case sets nothing and
+follows `fleet.json`.
 
 If the fetch fails (network hiccup, `fleet.json` briefly unparseable), the
 run logs a warning and falls back to the workflow's own built-in
@@ -196,7 +198,7 @@ history regardless but the PR will still need a fresh approval to merge.
 | `prompt` | (required) | The full review brief. |
 | `provider` | `""` | `anthropic` / `qwen` / `openrouter` / `zai`. Empty (the normal case) resolves to `CODE_REVIEW_PROVIDER`, then `fleet.json`, then `anthropic`. See 'Fleet-wide defaults'. |
 | `tier` | `""` | `high` / `medium` / `low`. Empty (the normal case) resolves to `CODE_REVIEW_TIER`, then `fleet.json`, then `medium`. |
-| `model` | `""` | Explicit `--model` override, bypassing tier mapping entirely. Leave empty to resolve from `tier` instead. |
+| `model` | `""` | Explicit `--model` override, bypassing tier mapping entirely. Empty resolves to the calling repo's `CODE_REVIEW_MODEL`, then `tier`. |
 | `allowed-tools` | `Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(date:*),Bash(git log:*),Bash(wc:*),Read,Write,Glob,Grep` | `--allowedTools` argument. |
 | `disallowed-tools` | `Agent Workflow Task` | `--disallowedTools` argument. Denies subagent fan-out outright — it multiplies token cost and burns the wall-clock budget before anything posts. |
 | `runner` | `ubicloud-standard-2` | GitHub Actions runner label the review job runs on. A small runner suffices — the job waits on the model rather than building. Defaults to a small Ubicloud runner; GitHub's own runners don't always reach the Qwen Token Plan or OpenRouter endpoints. |
