@@ -491,7 +491,19 @@ jobs:
           report "the first body line repeats the title - squash-merge already puts the title on the subject line"
         fi
 
+        # A label wearing markdown - '**Enhancements:**', '## Enhancements' - is
+        # not a missing section, and reporting it as one sends the author looking
+        # for something that is already there. Section labels are plain text: the
+        # description ships as the commit message, where the markup is noise.
+        marked_up=$(grep -oE '^([[:space:]]*[*_#>]+[[:space:]]*)+(Enhancements|Bugs fixed|Technical):?[*_[:space:]]*$' body.txt \
+          | head -3 | sed -E "s/^[[:space:]]*|[[:space:]]*$//g; s/^/'/; s/$/'/" | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+
+        if [ -n "$marked_up" ]; then
+          report "section label(s) carrying markdown: ${marked_up} - the labels are plain text, so write 'Enhancements:' rather than marking it up as a heading or in bold"
+        fi
+
         if [ "$REQUIRE_SECTION" = "true" ] \
+          && [ -z "$marked_up" ] \
           && ! grep -qE '^(Enhancements|Bugs fixed|Technical):' body.txt ; then
           report "no 'Enhancements:' / 'Bugs fixed:' / 'Technical:' section - at least one is required"
         fi
@@ -500,8 +512,8 @@ jobs:
         # it is written for a changelog reader rather than for the reviewer is
         # a judgement the model makes; length is the part a grep can settle,
         # and the threshold is generous enough that only an essay trips it.
-        if grep -qE '^(Enhancements|Bugs fixed|Technical):' body.txt ; then
-          intro=$(sed -n '1,/^\(Enhancements\|Bugs fixed\|Technical\):/p' body.txt | sed '$d')
+        if grep -qE '^([[:space:]]*[*_#>]+[[:space:]]*)*(Enhancements|Bugs fixed|Technical):' body.txt ; then
+          intro=$(sed -n '1,/^\([[:space:]]*[*_#>]\+[[:space:]]*\)*\(Enhancements\|Bugs fixed\|Technical\):/p' body.txt | sed '$d')
           intro_lines=$(printf '%s' "$intro" | grep -cE '[^[:space:]]' || true)
           intro_chars=$(printf '%s' "$intro" | tr -d '[:space:]' | wc -c)
           if [ "$intro_lines" -gt 6 ] || [ "$intro_chars" -gt 600 ]; then
