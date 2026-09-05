@@ -123,6 +123,14 @@ on:
           job timeout is a backstop for a wedged run, not the working budget.
         type: number
         default: 4
+      hard-stop-grace-seconds:
+        description: >-
+          Extra time after post-findings-after-minutes before the run is killed outright.
+          The budget the review is told about is a working deadline; this is how long it
+          gets to finish the post it was told to start. Whatever is in review.json when
+          the kill lands is posted as a partial review.
+        type: number
+        default: 90
       transcript-retention-days:
         description: >-
           Retention for the uploaded review transcript. The full event stream carries
@@ -135,9 +143,9 @@ on:
         type: string
         default: "2.1.221"
       job-timeout-minutes:
-        description: "Outer job timeout-minutes (belt-and-braces on top of the idle watchdog)."
+        description: "Outer job timeout-minutes (belt-and-braces on top of the idle and deadline watchdogs)."
         type: number
-        default: 12
+        default: 8
       gh-app-id:
         description: "Optional GitHub App id. When supplied alongside gh-app-private-key, the review posts under this App's installation identity instead of github-actions[bot]."
         type: string
@@ -204,6 +212,7 @@ jobs:
       ALLOWED_TOOLS: ${{ inputs.allowed-tools }}
       DISALLOWED_TOOLS: ${{ inputs.disallowed-tools }}
       POST_AFTER_MIN: ${{ inputs.post-findings-after-minutes }}
+      HARD_STOP_GRACE_S: ${{ inputs.hard-stop-grace-seconds }}
       IDLE_TIMEOUT_S: ${{ inputs.idle-timeout-seconds }}
       MAX_ATTEMPTS: ${{ inputs.max-attempts }}
       CLAUDE_VERSION: ${{ inputs.claude-version }}
@@ -732,7 +741,7 @@ jobs:
         # without downloading anything. The stream is JSONL with stderr interleaved,
         # so every line is parsed defensively and unparseable ones are dropped.
         scorecard() {
-          local attempt=$1 f=$2 rc=$3 idle=$4
+          local attempt=$1 f=$2 rc=$3 killed=$4
           local j
           j=$(jq -R 'fromjson? // empty' < "$f" 2>/dev/null | jq -s '.' 2>/dev/null) || j='[]'
           [ -n "$j" ] || j='[]'
@@ -754,17 +763,57 @@ jobs:
             printf '|---|---|---|---|---|---|---|---|---|\n'
           fi
           printf '| %s | rc=%s%s | %ss | %s | %s | %s | %s | %s | $%s |\n' \
-            "$attempt" "$rc" "$([ "$idle" = "true" ] && echo ' idle-killed')" \
+            "$attempt" "$rc" "$([ "$killed" = "true" ] && echo ' watchdog-killed')" \
             "$(( dur / 1000 ))" "$turns" "$tools" "$fanout" "$refused" "$posted" "$cost"
           [ -n "$names" ] && printf '\n%s\n' "$names"
         }
 
-        # An absolute wall-clock deadline, not a duration: elapsed time is otherwise
-        # unobservable from inside the run, which makes any "finish within N minutes"
-        # instruction unactionable. Bash(date:*) is in the default allowlist so the
-        # deadline can actually be checked against the clock.
-        POST_BY=$(date -u -d "+${POST_AFTER_MIN} minutes" +'%H:%M:%SZ')
-        STARTED_AT=$(date -u +'%H:%M:%SZ')
+        # Elapsed time is not observable from inside the run, and asking the model to
+        # measure it against a wall-clock deadline does not work: the last run that
+        # overran did check the clock, noticed it was over budget, and carried on. So
+        # the remaining time is pushed instead of pulled. A PostToolUse hook fires on
+        # every tool call and returns the time left as a duration, which costs the model
+        # nothing to remember and nothing to compute, and the wording escalates on its
+        # own as the budget runs down.
+        DEADLINE_EPOCH=$(( $(date +%s) + POST_AFTER_MIN * 60 ))
+        HOOK_DIR="${RUNNER_TEMP}/review-budget"
+        mkdir -p "$HOOK_DIR"
+        echo "$DEADLINE_EPOCH" > "$HOOK_DIR/deadline"
+
+        cat > "$HOOK_DIR/budget.sh" <<'BUDGET_HOOK'
+        #!/usr/bin/env bash
+        # PostToolUse hook: report the remaining budget as a duration.
+        # additionalContext is the only channel that reaches the model on an exit-0
+        # hook; plain stdout is swallowed.
+        set -euo pipefail
+        cat >/dev/null || true
+        deadline=$(cat "$1" 2>/dev/null || echo 0)
+        left=$(( deadline - $(date +%s) ))
+
+        if [ "$left" -gt 120 ]; then
+          text="Time budget: $(( left / 60 ))m $(( left % 60 ))s remaining."
+        elif [ "$left" -gt 30 ]; then
+          text="Time budget: $(( left / 60 ))m $(( left % 60 ))s remaining. Stop investigating and start writing up. Put what you already have into review.json now; further reading is no longer affordable."
+        elif [ "$left" -gt 0 ]; then
+          text="Time budget: ${left}s remaining. Post now. Write review.json with the findings you have and POST it with gh api. This run is killed shortly and anything unposted is lost."
+        else
+          text="Time budget: EXPIRED. Post immediately — write review.json and POST it with gh api on this turn. Do not read anything further."
+        fi
+
+        printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":%s}}\n' \
+          "$(printf '%s' "$text" | jq -Rs .)"
+        BUDGET_HOOK
+        chmod +x "$HOOK_DIR/budget.sh"
+
+        cat > "$HOOK_DIR/settings.json" <<SETTINGS
+        {
+          "hooks": {
+            "PostToolUse": [
+              { "matcher": "*", "hooks": [ { "type": "command", "command": "${HOOK_DIR}/budget.sh ${HOOK_DIR}/deadline" } ] }
+            ]
+          }
+        }
+        SETTINGS
 
         # Append a small note about sandbox/CLI quirks and the canonical posting command
         # so each caller doesn't repeat them. The model has historically picked the wrong
@@ -772,8 +821,9 @@ jobs:
         FULL_PROMPT="$PROMPT
 
         Time budget:
-        - This run started at ${STARTED_AT} and must have posted its review by ${POST_BY} (UTC, currently ${POST_AFTER_MIN} minutes). Check the clock with 'date -u' whenever you are unsure how much of it you have used.
-        - That deadline is the working budget, not an emergency stop. The runner kills the job a few minutes later, and a killed run posts nothing at all: no review, a failed check, and a PR blocked on work nobody can read. A shallower review that gets posted beats a deeper one that does not.
+        - You have ${POST_AFTER_MIN} minutes to post this review. You do not have to track that yourself and you must not try: after every tool call you are told how much of it is left, as a duration. Do not run 'date' to work it out — the answer is already in front of you, and the one thing that budget line asks of you is that you act on it.
+        - When it tells you to stop investigating, stop investigating. That instruction arrives while you still have time to write up, and it is the whole point of the budget: it is not a status report to note and read past. A run that reads one more file after being told to stop is the run that posts nothing.
+        - The budget is a working deadline, not the emergency stop. The run is killed shortly after it expires, and a killed run posts nothing at all: no review, a failed check, and a PR blocked on work nobody can read. A shallower review that gets posted beats a deeper one that does not.
         - Depth is yours to spend against that budget. Read what the diff makes you want to read, then stop and post. If the budget is nearly gone, post what you have — a review covering the changes you did read is a complete review, not a partial one.
         - Do not delegate to subagents or parallel workers. They are disabled: they multiply token cost, and coordinating them is what exhausts the budget before anything reaches the PR. One reviewer, reading directly.
 
@@ -875,6 +925,12 @@ jobs:
           # weighed to reach it.
           OUT="${LOG_DIR}/stream-attempt-${attempt}.json"
 
+          # Each attempt gets the full budget: a retry born already expired would post
+          # nothing but the escalation, which is worse than not retrying at all.
+          DEADLINE_EPOCH=$(( $(date +%s) + POST_AFTER_MIN * 60 ))
+          HARD_STOP_EPOCH=$(( DEADLINE_EPOCH + HARD_STOP_GRACE_S ))
+          echo "$DEADLINE_EPOCH" > "$HOOK_DIR/deadline"
+
           claude \
             --model "$MODEL" \
             --verbose \
@@ -882,6 +938,7 @@ jobs:
             --add-dir "$PWD" \
             --allowedTools "$ALLOWED_TOOLS" \
             --disallowedTools "$DISALLOWED_TOOLS" \
+            --settings "$HOOK_DIR/settings.json" \
             -p "$FULL_PROMPT" > "$OUT" 2>&1 &
           CLAUDE_PID=$!
 
@@ -895,9 +952,28 @@ jobs:
 
           LAST_SIZE=0
           IDLE=0
-          IDLE_KILLED=false
+          WATCHDOG_KILLED=false
+          DEADLINE_KILLED=false
           while kill -0 "$CLAUDE_PID" 2>/dev/null; do
             sleep 5
+
+            # The deadline stop, distinct from the idle stop above it. The idle watchdog
+            # only fires on silence, and a model that streams thinking tokens is never
+            # silent, so before this existed nothing at all reacted to the clock between
+            # the soft deadline and the job timeout. Whatever review.json holds at this
+            # point is posted by the salvage step.
+            if [ "$(date +%s)" -ge "$HARD_STOP_EPOCH" ]; then
+              echo "::warning::budget exhausted (${POST_AFTER_MIN}m + ${HARD_STOP_GRACE_S}s grace) — killing PID ${CLAUDE_PID} and children"
+              pkill -TERM -P "$CLAUDE_PID" 2>/dev/null || true
+              kill -TERM "$CLAUDE_PID" 2>/dev/null || true
+              sleep 2
+              pkill -KILL -P "$CLAUDE_PID" 2>/dev/null || true
+              kill -KILL "$CLAUDE_PID" 2>/dev/null || true
+              WATCHDOG_KILLED=true
+              DEADLINE_KILLED=true
+              break
+            fi
+
             SIZE=$(stat -c %s "$OUT" 2>/dev/null || echo 0)
             if [ "$SIZE" = "$LAST_SIZE" ]; then
               IDLE=$((IDLE + 5))
@@ -908,7 +984,7 @@ jobs:
                 sleep 2
                 pkill -KILL -P "$CLAUDE_PID" 2>/dev/null || true
                 kill -KILL "$CLAUDE_PID" 2>/dev/null || true
-                IDLE_KILLED=true
+                WATCHDOG_KILLED=true
                 break
               fi
             else
@@ -923,13 +999,22 @@ jobs:
           # Written per attempt rather than once at the end: a run the runner kills at
           # timeout-minutes is the one whose numbers matter most, and it never reaches
           # the end.
-          scorecard "$attempt" "$OUT" "$RC" "$IDLE_KILLED" >> "$GITHUB_STEP_SUMMARY"
+          scorecard "$attempt" "$OUT" "$RC" "$WATCHDOG_KILLED" >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "$IDLE_KILLED" = "false" ] && [ "$RC" -eq 0 ]; then
+          if [ "$WATCHDOG_KILLED" = "false" ] && [ "$RC" -eq 0 ]; then
             echo "::notice::review completed on attempt ${attempt}"
             exit 0
           fi
-          echo "::warning::attempt ${attempt} failed (rc=${RC}, idle_killed=${IDLE_KILLED})"
+          echo "::warning::attempt ${attempt} failed (rc=${RC}, watchdog_killed=${WATCHDOG_KILLED})"
+
+          # A retry after a deadline kill would spend the same budget reading the same
+          # diff and reach the same point, while the job timeout is not generous enough
+          # for two full budgets - and a job killed at that timeout skips the salvage
+          # step, losing the findings this attempt did write. Stop and let salvage run.
+          if [ "$DEADLINE_KILLED" = "true" ]; then
+            echo "::warning::budget exhausted — not retrying; salvaging whatever review.json holds"
+            break
+          fi
         done
 
         echo "::error::review not posted after ${MAX_ATTEMPTS} attempt(s) — failing the check so the diff is not merged unreviewed"

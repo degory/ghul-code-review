@@ -68,10 +68,40 @@ Every uncertain direction fails open. A review whose body carries no marker —
 one posted before this existed, or a run where the model dropped it — does not
 match, and the review runs as normal.
 
+## The time budget
+
+The review is given a working budget (`post-findings-after-minutes`) and is
+killed `hard-stop-grace-seconds` after it expires.
+
+**The budget is pushed, not pulled.** A `PostToolUse` hook fires on every tool
+call and returns the time left as a duration — `Time budget: 2m 31s remaining.`
+— through `hookSpecificOutput.additionalContext`, the only hook channel that
+reaches the model. The wording escalates on its own: under two minutes it says
+to stop investigating and start writing up, under thirty seconds it says to
+post now, and past zero it says the run is about to be killed.
+
+Earlier versions instead told the review the wall-clock time it had to post by
+and left it to check the clock. That does not work, and the failure is not that
+the model forgot: a run that overran by five minutes had checked the clock and
+said in its own output that it was over budget, and kept reading anyway.
+Measuring elapsed time is work the model has to remember to do, and a deadline
+it has to convert into a decision every time it looks. A duration it is handed
+is neither.
+
+The kill is what makes the budget real. The idle watchdog cannot do it — it
+fires on stdout silence, and a model that streams thinking tokens is never
+silent — so before the deadline stop existed, nothing at all reacted to the
+clock between the budget expiring and the job timeout.
+
+A deadline kill does not retry. A second attempt would spend the same budget
+reading the same diff and reach the same place, and two full budgets do not fit
+inside `job-timeout-minutes` — and a job killed at *that* timeout skips the
+salvage step, which is the one thing that still gets the findings onto the PR.
+
 ## When a review is killed
 
-The idle watchdog, the job timeout, or a stalled provider can kill a run
-before it posts. That used to lose the review entirely: the check failed with
+The deadline stop, the idle watchdog, the job timeout, or a stalled provider
+can kill a run before it posts. That used to lose the review entirely: the check failed with
 no feedback, and the author had to push again — paying a full CI cycle — to
 find out what it would have said.
 
@@ -311,10 +341,11 @@ history regardless but the PR will still need a fresh approval to merge.
 | `runner` | `ubicloud-standard-2` | GitHub Actions runner label the review job runs on. A small runner suffices — the job waits on the model rather than building. Defaults to a small Ubicloud runner; GitHub's own runners don't always reach the Qwen Token Plan or OpenRouter endpoints. |
 | `idle-timeout-seconds` | `180` | Kill the reviewer after this many seconds of stdout silence; must exceed the model's time-to-first-token on a cold start. |
 | `max-attempts` | `1` | Attempt cap. A retry re-reads the PR from a fresh context and competes for the same job budget, so the default is to fail the check and let the next push re-trigger the review. |
-| `post-findings-after-minutes` | `4` | Wall-clock budget given to the review: post by this point, whatever depth was reached. |
+| `post-findings-after-minutes` | `4` | Working budget for the review: post by this point, whatever depth was reached. Pushed into the model's context as a remaining duration after every tool call — see 'The time budget'. |
+| `hard-stop-grace-seconds` | `90` | Extra time after that budget before the run is killed outright. Whatever `review.json` holds at that moment is posted as a partial review. |
 | `transcript-retention-days` | `14` | Retention for the uploaded transcript. |
 | `claude-version` | `2.1.221` | Claude CLI version installed on the runner. |
-| `job-timeout-minutes` | `12` | Outer cap on the whole job. A backstop for a wedged run, not the working budget — a run that reaches it is killed and posts nothing. |
+| `job-timeout-minutes` | `8` | Outer cap on the whole job. A backstop for a wedged run, not the working budget — a run that reaches it is killed and posts nothing, because the salvage step never runs. |
 | `gh-app-id` | `""` | GitHub App id. With `gh-app-private-key`, the review posts under that App's installation identity instead of `github-actions[bot]`. |
 | `ghul-reference` | `false` | Fetch `GHUL.md` from `degory/ghul` main into the workspace root, for repos whose diffs contain ghūl source. |
 | `style-reference` | `false` | Fetch `STYLE.md` from `degory/ghul-style` main into the workspace root, for repos carrying human-facing prose or example code. Needs `gh-app-id`, and `ghul-style` in `extra-repositories`. |
