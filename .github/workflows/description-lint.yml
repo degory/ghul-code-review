@@ -73,9 +73,15 @@ jobs:
           findings=$((findings + 1))
         }
 
+        # GitHub runs a step's script under 'bash -e', so a function whose
+        # body ends in a && list returns non-zero when the left side does not
+        # match - and errexit then kills the script at the first check that
+        # finds nothing, which is the common case. The explicit return is what
+        # keeps a non-match a non-finding rather than the end of the run.
         check() {
           local pattern=$1 message=$2
           grep -qiE "$pattern" body.txt && report "$message"
+          return 0
         }
 
         printf '### PR description lint\n\n' >> "$GITHUB_STEP_SUMMARY"
@@ -91,6 +97,10 @@ jobs:
         check '#(minor|major)\b' \
           "#minor/#major marker is a no-op - raise the VERSION file instead"
 
+        # Safe under errexit as written: a command that fails as the left side
+        # of a && list does not trigger it. Only the check() calls above needed
+        # the explicit return, because there the failure is the function's own
+        # exit status.
         grep -qF '🤖 Generated with' body.txt && report "Claude Code footer in the body"
         grep -qE 'claude\.ai/code/session_' body.txt && report "session URL in the body"
         grep -qE '(docs/claude|PENDING-PRS|memory file|CLAUDE\.md)' body.txt && report "private reference in the body"
