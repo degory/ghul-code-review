@@ -121,7 +121,8 @@ entry, so what it says ships permanently. The mechanical conventions — no
 `Co-authored-by:` trailer in the body, no local test results, no internal
 labels, no private references or local paths, no inert `#minor` marker, no
 first line repeating the title, at least one `Enhancements:` / `Bugs fixed:` /
-`Technical:` section, and an intro paragraph that is actually brief — are
+`Technical:` section, those labels written as plain text rather than marked up
+as headings or in bold, and an intro paragraph that is actually brief — are
 checked by grep inside the review job, before the model starts.
 
 Findings are **seeded into `review.json`** rather than posted on their own, so
