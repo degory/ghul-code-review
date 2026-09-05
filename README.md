@@ -121,9 +121,14 @@ entry, so what it says ships permanently. The mechanical conventions — no
 `Co-authored-by:` trailer in the body, no local test results, no internal
 labels, no private references or local paths, no inert `#minor` marker, no
 first line repeating the title, at least one `Enhancements:` / `Bugs fixed:` /
-`Technical:` section, those labels written as plain text rather than marked up
-as headings or in bold, and an intro paragraph that is actually brief — are
-checked by grep inside the review job, before the model starts.
+`Technical:` section, and those labels written as plain text rather than
+marked up as headings or in bold — are checked by grep inside the review job,
+before the model starts.
+
+The shape of the description as a whole is not checked here. Enforcing it
+after a run has started costs a CI cycle and a review cycle to say something
+that was knowable before either began, so it belongs at the point the
+description is written rather than in the review.
 
 Findings are **seeded into `review.json`** rather than posted on their own, so
 they ride out with whatever the model finds in the diff and the author fixes
