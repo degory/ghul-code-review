@@ -142,6 +142,14 @@ on:
         description: "Optional GitHub App id. When supplied alongside gh-app-private-key, the review posts under this App's installation identity instead of github-actions[bot]."
         type: string
         default: ""
+      require-description-section:
+        description: >-
+          Require the PR description to carry at least one 'Enhancements:' /
+          'Bugs fixed:' / 'Technical:' section. Turn off for a repo that does
+          not generate release notes from the squash-merge message; the other
+          description checks apply either way.
+        type: boolean
+        default: true
       ghul-reference:
         description: "Fetch GHUL.md from degory/ghul main into the workspace root, for repos whose diffs contain ghūl source. The prompt can then point the review at it."
         type: boolean
@@ -375,7 +383,18 @@ jobs:
         # Line numbers move under a rebase without the change differing, and
         # so do the blob hashes on the index line. Neither is part of what a
         # reviewer read, so neither belongs in the fingerprint.
-        fingerprint=$(sed -E 's/^@@ .* @@.*$/@@/; /^index [0-9a-f]+\.\.[0-9a-f]+/d' .review-context/diff.patch | sha256sum | cut -d' ' -f1)
+        #
+        # The title and body are in it because they are reviewed too: the
+        # description ships as the squash-merge commit message, and a finding
+        # about it is cleared by editing the description rather than by
+        # touching the diff. Over the diff alone, that edit would leave the
+        # fingerprint unchanged, the standing verdict would be re-posted, and
+        # a description finding could never be cleared at all.
+        {
+          sed -E 's/^@@ .* @@.*$/@@/; /^index [0-9a-f]+\.\.[0-9a-f]+/d' .review-context/diff.patch
+          jq -r '.title, (.body // "")' .review-context/pr.json
+        } > .review-context/fingerprint-input
+        fingerprint=$(sha256sum < .review-context/fingerprint-input | cut -d' ' -f1)
         echo "fingerprint=${fingerprint}" >> "$GITHUB_OUTPUT"
 
         # The newest bot review carrying this fingerprint, and what it
@@ -392,6 +411,117 @@ jobs:
         else
           echo "skip=false" >> "$GITHUB_OUTPUT"
         fi
+
+    # The mechanical description conventions, checked by grep rather than by
+    # the model. They are cheap, they are unambiguous, and across a sample of
+    # one repo's pull requests the description was the single most common
+    # thing raised in a *second or later* review round - each of those costing
+    # the author a full CI cycle to fix.
+    #
+    # The findings are seeded into review.json rather than posted on their
+    # own, so they ride out with whatever the model finds in the diff and the
+    # author fixes both together. Posting them alone, without running the
+    # model, would cost the same round it saves: the diff would still be
+    # unreviewed, and the code findings would arrive a cycle later.
+    #
+    # The description ships as the squash-merge commit message and the
+    # changelog entry, which is why it is worth gating at all.
+    - name: Check the PR description
+      id: description
+      if: github.event_name == 'pull_request' && steps.human_approval.outputs.found != 'true' && steps.dependency_only.outputs.match != 'true' && steps.content_changed.outputs.skip != 'true'
+      env:
+        REQUIRE_SECTION: ${{ inputs.require-description-section }}
+      run: |
+        set -uo pipefail
+
+        # The description reaches the checks through a file rather than being
+        # interpolated into this script, so one containing shell
+        # metacharacters is data. (An expression written out in a comment here
+        # would still be expanded - the whole block is expanded before any of
+        # it is shell - so this says it in words.)
+        jq -r '.body // ""'  .review-context/pr.json > body.txt
+        jq -r '.title // ""' .review-context/pr.json > title.txt
+
+        : > .review-context/description-findings.txt
+
+        report() {
+          printf '%s\n' "$1" >> .review-context/description-findings.txt
+          printf '::warning title=PR description::%s\n' "$1"
+        }
+
+        # GitHub runs this under 'bash -e', so a function ending in a && list
+        # returns non-zero when the left side does not match - and errexit
+        # would then end the run at the first check that found nothing, which
+        # is the common case. The explicit return is what keeps a non-match a
+        # non-finding.
+        check() {
+          grep -qiE "$1" body.txt && report "$2"
+          return 0
+        }
+
+        check '^##+ *(summary|test plan|testing)' \
+          "'## Summary' / '## Test plan' heading - the description is the summary, so the heading says nothing"
+        check '^co-authored-by:' \
+          "Co-authored-by trailer in the body - squash-merge appends a deduped one, so this ships twice"
+        check '(pass(es|ed)? locally|all [0-9]+ .*tests? pass|bootstrap green|tested locally)' \
+          "local test results in the body - CI is the proof of what shipped, and the claim is unverifiable in the commit log"
+        check '(phase [0-9]|stage [0-9]|predecessor branch|option [ABC]\b|follow-up PR [0-9])' \
+          "internal label in the body - meaningless to someone reading the commit log later"
+        check '#(minor|major)\b' \
+          "#minor/#major marker is a no-op - raise the VERSION file instead"
+
+        grep -qF '🤖 Generated with' body.txt && report "Claude Code footer in the body"
+        grep -qE 'claude\.ai/code/session_' body.txt && report "session URL in the body"
+        grep -qE '(docs/claude|PENDING-PRS|memory file|CLAUDE\.md)' body.txt && report "private reference in the body"
+        grep -qE '/home/[a-z0-9_-]+/|worktrees/' body.txt && report "local filesystem path in the body"
+
+        # The title is repeated on the squash-merge subject line, so a body
+        # opening by restating it ships the same sentence twice.
+        first_line=$(head -1 body.txt | sed -E 's/^#+ *//; s/[[:space:]]+$//')
+        if [ -n "$first_line" ] && [ "$first_line" = "$(cat title.txt)" ]; then
+          report "the first body line repeats the title - squash-merge already puts the title on the subject line"
+        fi
+
+        if [ "$REQUIRE_SECTION" = "true" ] \
+          && ! grep -qE '^(Enhancements|Bugs fixed|Technical):' body.txt ; then
+          report "no 'Enhancements:' / 'Bugs fixed:' / 'Technical:' section - at least one is required"
+        fi
+
+        # A brief intro paragraph before the first section is allowed. Whether
+        # it is written for a changelog reader rather than for the reviewer is
+        # a judgement the model makes; length is the part a grep can settle,
+        # and the threshold is generous enough that only an essay trips it.
+        if grep -qE '^(Enhancements|Bugs fixed|Technical):' body.txt ; then
+          intro=$(sed -n '1,/^\(Enhancements\|Bugs fixed\|Technical\):/p' body.txt | sed '$d')
+          intro_lines=$(printf '%s' "$intro" | grep -cE '[^[:space:]]' || true)
+          intro_chars=$(printf '%s' "$intro" | tr -d '[:space:]' | wc -c)
+          if [ "$intro_lines" -gt 6 ] || [ "$intro_chars" -gt 600 ]; then
+            report "the text before the first section runs to ${intro_lines} lines / ${intro_chars} characters - an intro is two or three sentences, and anything longer is bullets in disguise"
+          fi
+        fi
+
+        count=$(wc -l < .review-context/description-findings.txt)
+        echo "count=${count}" >> "$GITHUB_OUTPUT"
+
+        if [ "$count" -eq 0 ]; then
+          echo "PR description: clean"
+          exit 0
+        fi
+
+        # Seeded as the review the model will extend and post. It is written
+        # here rather than described in the prompt so that the findings exist
+        # on disk before the model starts: if the run is killed, the salvage
+        # step posts them even though the model never reached anything.
+        jq -Rs --arg n "$count" \
+          '{event: "REQUEST_CHANGES",
+            body: ("**" + $n + " finding(s) on the PR description**, from the mechanical checks. The description becomes the squash-merge commit message and the changelog entry, so it ships permanently.\n\n"
+                   + (split("\n") | map(select(length > 0)) | map("- " + .) | join("\n"))),
+            comments: []}' \
+          < .review-context/description-findings.txt > review.json
+
+        printf '### PR description\n\n' >> "$GITHUB_STEP_SUMMARY"
+        sed 's/^/- /' .review-context/description-findings.txt >> "$GITHUB_STEP_SUMMARY"
+        echo "PR description: ${count} finding(s), seeded into review.json"
 
     # Re-stating the standing verdict rather than staying silent, because a
     # skipped review must not leave the pull request stuck. Where branch
@@ -660,7 +790,7 @@ jobs:
             .review-context/reviews.json        — prior PR reviews (use to acknowledge already-resolved findings, avoid duplicates)
             .review-context/review-comments.json — prior inline review comments
         - Post exactly one formal PR Review per run. The event is a binary choice on whether you are raising anything at all:
-            - Nothing to raise -> approve, with a body that opens '**Reviewed** - no findings.' so that a full review is distinguishable at a glance from the runs that approve without starting the model at all. Approval is the merge signal (branch protection can require an approving review of the latest changes and auto-merge waits on it), so always post it explicitly rather than staying silent — a skipped review is indistinguishable from a stuck bot.
+            - Nothing to raise, and no pre-seeded review.json -> approve, with a body that opens '**Reviewed** - no findings.' so that a full review is distinguishable at a glance from the runs that approve without starting the model at all. Approval is the merge signal (branch protection can require an approving review of the latest changes and auto-merge waits on it), so always post it explicitly rather than staying silent — a skipped review is indistinguishable from a stuck bot.
             - One or more findings, of any severity -> write a JSON file (e.g. review.json) and POST it via the reviews endpoint with event REQUEST_CHANGES:
                 gh api repos/<OWNER>/<REPO>/pulls/<PR-number>/reviews -X POST --input review.json
               The JSON shape:
@@ -678,6 +808,8 @@ jobs:
         - Do NOT use 'gh pr comment' — that creates an issue comment, not a review.
         - The working directory (e.g. /home/runner/work/<repo>/<repo>) is writeable — Write the JSON there. /tmp is NOT writeable.
         - JSON 'body' fields can contain markdown (including '# headings') — the '#'-at-line-start guard only applies to command-line --body arguments, not to file contents POSTed via --input.
+        - review.json may already exist when you start. If it does, it holds findings from the mechanical description checks, which have already run - they are correct, they are not yours to re-judge, and they must survive into whatever you post. Add your own findings to its 'comments' array, leave its 'body' text in place (append to it if you have cross-cutting commentary of your own), and keep the event REQUEST_CHANGES. Do NOT approve when that file exists, even if the diff itself is clean: the description ships as the commit message, and approving would ship it uncorrected.
+        - Do not spend a finding of your own on anything those checks already cover - headings, footers, session URLs, trailers, local test results, internal labels, private references, a first line repeating the title, a missing section, an over-long intro. What is left for you is the part a grep cannot see: whether the description describes what the diff actually does, and whether an intro is written for the right reader.
         - Name the file 'review.json', in the working directory, and write it as soon as you have your first surviving finding — then rewrite it as each further one survives. If this run is killed before it posts (watchdog, job timeout, a stalled provider), whatever is in that file at that moment is posted on your behalf as a partial review; anything you were holding in your head is lost. Writing it once at the end throws that away for nothing.
         - Put this marker on its own line at the end of the review 'body', in both the approve and the request-changes case, with the value exactly as given:
             <!-- review-fingerprint: ${CONTENT_FINGERPRINT} -->
@@ -802,6 +934,43 @@ jobs:
 
         echo "::error::review not posted after ${MAX_ATTEMPTS} attempt(s) — failing the check so the diff is not merged unreviewed"
         exit 1
+
+    # The model does the posting, so nothing upstream can force what it
+    # posts. When the description checks found something, an approval is a
+    # wrong answer that ships a bad commit message - and with auto-merge armed
+    # it ships it immediately. This is the check that the seeded findings
+    # actually reached the pull request, and the correction when they did not.
+    #
+    # success() rather than always(): a failed run is the salvage step's case,
+    # and that step posts the seeded findings itself.
+    - name: Make sure the description findings were posted
+      if: success() && steps.description.outputs.count != '' && steps.description.outputs.count != '0'
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        COUNT: ${{ steps.description.outputs.count }}
+      run: |
+        set -uo pipefail
+
+        latest=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+          --jq 'last(.[] | select(.user.type == "Bot") | .state) // ""')
+
+        if [ "$latest" = "CHANGES_REQUESTED" ]; then
+          echo "the posted review requests changes, as it should"
+          exit 0
+        fi
+
+        echo "::warning::the review posted '${latest}' despite ${COUNT} description finding(s) - posting them separately"
+        jq -Rs --arg n "$COUNT" \
+          '{event: "REQUEST_CHANGES",
+            body: ("**" + $n + " finding(s) on the PR description**, from the mechanical checks.\n\n"
+                   + (split("\n") | map(select(length > 0)) | map("- " + .) | join("\n"))
+                   + "\n\nThe description becomes the squash-merge commit message and the changelog entry, so it ships permanently.")}' \
+          < .review-context/description-findings.txt > description-review.json
+        gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" -X POST --input description-review.json >/dev/null \
+          && echo "::notice::posted the description findings the review left out" \
+          || echo "::warning::could not post the description findings"
 
     # A killed run - idle watchdog, job timeout, provider stall - otherwise
     # posts nothing at all, and the review is a total loss: the check fails

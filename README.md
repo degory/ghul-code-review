@@ -41,7 +41,11 @@ whole run's cost avoided, and none of them leaves the PR without a review.
 
 The last of those is a fingerprint over the diff with hunk headers and blob
 hashes normalised out, so a rebase that only shifts line numbers still
-matches. The review carries it in an HTML comment at the end of its body,
+matches. The title and body are in it too, because they are reviewed as well:
+a finding about the description is cleared by editing the description rather
+than the diff, and over the diff alone that edit would leave the fingerprint
+unchanged — the standing verdict would be re-posted and the finding could
+never be cleared. The review carries it in an HTML comment at the end of its body,
 which GitHub does not render, so it is invisible to readers and readable from
 the reviews API.
 
@@ -79,33 +83,38 @@ because auto-merge acts on it — and it says at the top that it did not cover
 the whole diff. The job stays failed either way: the salvage is feedback for
 the author, not a verdict for the merge gate.
 
-## PR description lint
+## PR description checks
 
-A second reusable workflow, `description-lint.yml`, greps a pull request
-description for the conventions the review prompt already states: no
+The description becomes the squash-merge commit message and the changelog
+entry, so what it says ships permanently. The mechanical conventions — no
 `## Summary` heading, no Claude Code footer or session URL, no
 `Co-authored-by:` trailer in the body, no local test results, no internal
 labels, no private references or local paths, no inert `#minor` marker, no
-first line repeating the title, and at least one `Enhancements:` /
-`Bugs fixed:` / `Technical:` section.
+first line repeating the title, at least one `Enhancements:` / `Bugs fixed:` /
+`Technical:` section, and an intro paragraph that is actually brief — are
+checked by grep inside the review job, before the model starts.
 
-It exists because a description problem raised by the *reviewer* costs a
-review round and a full CI cycle to fix, and across a sample of one repo's
-pull requests the description was the single most common thing raised in a
-second or later round. Caught by grep it costs seconds and no tokens, and the
-reviewer's attention stays on the diff.
+Findings are **seeded into `review.json`** rather than posted on their own, so
+they ride out with whatever the model finds in the diff and the author fixes
+both together. Posting them alone without running the model would cost the
+same round it saves: the diff would still be unreviewed, and the code findings
+would arrive a cycle later. The model is told the seeded findings are not its
+to re-judge, not to spend a finding on anything they already cover, and not to
+approve while they exist.
 
-```yaml
-jobs:
-  description_lint:
-    if: ${{ github.event_name == 'pull_request' }}
-    uses: degory/ghul-code-review/.github/workflows/description-lint.yml@v7
-```
+Because the model does the posting, nothing upstream can force what it posts —
+so a following step checks the posted review actually requests changes, and
+posts the findings itself if not. An approval over a bad description would
+ship that description, immediately, with auto-merge armed.
 
-Set `require-section: false` for a repo that does not generate release notes
-from the squash-merge message. Making it a *required* status check is the
-calling repo's decision and needs a branch-protection change; without that it
-shows red and blocks nothing.
+This is why the checks are not a separate job: a red advisory check is seen by
+nobody in an automated review flow, and making it a *required* status check
+would need a branch-protection change and would hard-block a merge on an
+eleven-grep heuristic. Riding in the review uses the approval gate that is
+already there.
+
+Set `require-description-section: false` for a repo that does not generate
+release notes from the squash-merge message; the other checks apply either way.
 
 ## Providers
 
