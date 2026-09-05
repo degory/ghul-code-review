@@ -70,6 +70,34 @@ because auto-merge acts on it — and it says at the top that it did not cover
 the whole diff. The job stays failed either way: the salvage is feedback for
 the author, not a verdict for the merge gate.
 
+## PR description lint
+
+A second reusable workflow, `description-lint.yml`, greps a pull request
+description for the conventions the review prompt already states: no
+`## Summary` heading, no Claude Code footer or session URL, no
+`Co-authored-by:` trailer in the body, no local test results, no internal
+labels, no private references or local paths, no inert `#minor` marker, no
+first line repeating the title, and at least one `Enhancements:` /
+`Bugs fixed:` / `Technical:` section.
+
+It exists because a description problem raised by the *reviewer* costs a
+review round and a full CI cycle to fix, and across a sample of one repo's
+pull requests the description was the single most common thing raised in a
+second or later round. Caught by grep it costs seconds and no tokens, and the
+reviewer's attention stays on the diff.
+
+```yaml
+jobs:
+  description_lint:
+    if: ${{ github.event_name == 'pull_request' }}
+    uses: degory/ghul-code-review/.github/workflows/description-lint.yml@v7
+```
+
+Set `require-section: false` for a repo that does not generate release notes
+from the squash-merge message. Making it a *required* status check is the
+calling repo's decision and needs a branch-protection change; without that it
+shows red and blocks nothing.
+
 ## Providers
 
 | `provider` | Endpoint | Auth secret |
