@@ -612,12 +612,12 @@ jobs:
             qwen:high)         echo qwen3.8-max ;;
             qwen:medium)       echo qwen3.7-max ;;
             qwen:low)          echo qwen3.6-flash ;;
-            openrouter:high)   echo z-ai/glm-5.2 ;;
-            openrouter:medium) echo z-ai/glm-4.7 ;;
-            openrouter:low)    echo z-ai/glm-4.7-flash ;;
-            zai:high)          echo glm-5.2 ;;
-            zai:medium)        echo glm-5.2 ;;
-            zai:low)           echo glm-4.7 ;;
+            openrouter:high)   echo z-ai/glm-5.3 ;;
+            openrouter:medium) echo z-ai/glm-5.3-flash ;;
+            openrouter:low)    echo z-ai/glm-5.3-flash ;;
+            zai:high)          echo glm-5.3 ;;
+            zai:medium)        echo glm-5.3-flash ;;
+            zai:low)           echo glm-5.3-flash ;;
             *) echo "" ;;
           esac
         }
