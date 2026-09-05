@@ -26,17 +26,18 @@ review` / `gh api` / `date` / `git log` / `wc`, and subagent tools (`Agent`,
 multiplies its token cost and exhausts the job timeout before it posts
 anything, which leaves the PR blocked on a review nobody can read.
 
-## When a review is skipped
+## When the model is not run
 
 Three gates run before the model is ever started, in this order. Each is a
-whole run's cost avoided.
+whole run's cost avoided, and none of them leaves the PR without a review.
 
 - **A human has approved.** See 'Human override' below.
 - **A mechanical dependency-only Renovate PR.** Version-pin files only, from
   this fleet's own Renovate instance; approved directly.
 - **The reviewed content has not changed since the last review.** A rebase, a
   merge from the base branch, or a force-push that only rewrites history
-  produces the same diff, and the review already posted still covers it.
+  produces the same diff, and the last review already covers it — so that
+  review's verdict is re-posted rather than re-derived.
 
 The last of those is a fingerprint over the diff with hunk headers and blob
 hashes normalised out, so a rebase that only shifts line numbers still
@@ -44,16 +45,19 @@ matches. The review carries it in an HTML comment at the end of its body,
 which GitHub does not render, so it is invisible to readers and readable from
 the reviews API.
 
-It relies on the calling repo's branch protection **not** dismissing stale
-reviews — the usual setting across this fleet — because the point is that the
-already-posted review is still the live one: an approval still counts towards
-the merge, and outstanding findings still block. Where stale reviews *are*
-dismissed, turn this off by ensuring the marker never matches, or the PR will
-sit needing an approval that no longer exists.
+**It re-states the standing verdict rather than staying silent.** A previous
+approval is re-posted as an approval; a previous request-changes as a
+body-only request-changes saying the findings still stand (the inline
+findings are already on the PR, and re-posting them would duplicate every one
+on each rebase). That costs one API call and no model time, and it means the
+gate does not depend on how the calling repo treats older reviews: where
+branch protection dismisses stale reviews, or requires the approval to be of
+the latest push, a silent skip would leave the PR stuck on a review nobody
+was going to run again.
 
 Every uncertain direction fails open. A review whose body carries no marker —
 one posted before this existed, or a run where the model dropped it — does not
-match, and the review proceeds as normal.
+match, and the review runs as normal.
 
 ## When a review is killed
 

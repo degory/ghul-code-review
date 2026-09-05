@@ -376,20 +376,63 @@ jobs:
         fingerprint=$(sed -E 's/^@@ .* @@.*$/@@/; /^index [0-9a-f]+\.\.[0-9a-f]+/d' .review-context/diff.patch | sha256sum | cut -d' ' -f1)
         echo "fingerprint=${fingerprint}" >> "$GITHUB_OUTPUT"
 
-        # The newest bot review that carries a marker at all. An APPROVED or
-        # a CHANGES_REQUESTED both count: either verdict is a review of this
-        # content, and both are still live when stale reviews are not
-        # dismissed.
+        # The newest bot review carrying this fingerprint, and what it
+        # decided. Either verdict counts: both are a review of this exact
+        # content.
         previous=$(jq -r --arg m "review-fingerprint: ${fingerprint}" \
-          '[.[] | select(.user.type == "Bot" and (.body // "" | contains($m)))] | length > 0' \
+          'last(.[] | select(.user.type == "Bot" and (.body // "" | contains($m))) | .state) // ""' \
           .review-context/reviews.json)
 
-        if [ "$previous" = "true" ]; then
+        if [ -n "$previous" ]; then
           echo "skip=true" >> "$GITHUB_OUTPUT"
-          echo "::notice::the reviewed content is unchanged since the last review (fingerprint ${fingerprint:0:12}) - skipping"
+          echo "previous_state=${previous}" >> "$GITHUB_OUTPUT"
+          echo "::notice::the reviewed content is unchanged since the last review (fingerprint ${fingerprint:0:12}, ${previous}) - re-posting that verdict without running the model"
         else
           echo "skip=false" >> "$GITHUB_OUTPUT"
         fi
+
+    # Re-stating the standing verdict rather than staying silent, because a
+    # skipped review must not leave the pull request stuck. Where branch
+    # protection dismisses stale reviews, or requires the approval to be of
+    # the latest push, the earlier review stops counting the moment a commit
+    # lands - and a silent skip would then block a pull request nobody is
+    # going to review again. Re-posting removes the dependency on those
+    # settings entirely: the verdict on this content is always the live one,
+    # whatever the repository is configured to do with older reviews.
+    #
+    # A CHANGES_REQUESTED is re-posted as a body-only review. The original
+    # inline findings are still on the pull request and still readable, and
+    # posting them again would duplicate every one of them on each rebase.
+    #
+    # This costs one API call and no model time, which is the whole point:
+    # the expensive part was never the posting.
+    - name: Re-post the standing review
+      if: steps.content_changed.outputs.skip == 'true'
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        PREVIOUS_STATE: ${{ steps.content_changed.outputs.previous_state }}
+        FINGERPRINT: ${{ steps.content_changed.outputs.fingerprint }}
+      run: |
+        set -euo pipefail
+
+        marker="<!-- review-fingerprint: ${FINGERPRINT} -->"
+
+        if [ "$PREVIOUS_STATE" = "APPROVED" ]; then
+          body="LGTM - unchanged since the last review of this content, so that approval stands.
+
+        ${marker}"
+          jq -n --arg b "$body" '{event: "APPROVE", body: $b}' > restate.json
+        else
+          body="The findings from the previous review still stand: nothing in the reviewed content has changed since it, so they have not been addressed. They are on that review, inline.
+
+        ${marker}"
+          jq -n --arg b "$body" '{event: "REQUEST_CHANGES", body: $b}' > restate.json
+        fi
+
+        gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" -X POST --input restate.json >/dev/null
+        echo "::notice::re-posted the standing ${PREVIOUS_STATE} verdict"
 
     # Resolves the fleet-wide default provider/tier, then which credentials
     # and concrete model the rest of the job uses. Only the secret the
