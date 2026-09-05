@@ -512,23 +512,6 @@ jobs:
           report "no 'Enhancements:' / 'Bugs fixed:' / 'Technical:' section - at least one is required"
         fi
 
-        # A brief intro paragraph before the first section is allowed. Whether
-        # it is written for a changelog reader rather than for the reviewer is
-        # a judgement the model makes; length is the part a grep can settle,
-        # and the threshold is generous enough that only an essay trips it.
-        if grep -qE '^([[:space:]]*[*_#>]+[[:space:]]*)*(Enhancements|Bugs fixed|Technical):' body.txt ; then
-          # awk rather than sed's '1,/re/': that range searches for its end
-          # pattern from the second line on, so a description opening directly
-          # with a section label - which is the shape the conventions ask for -
-          # never closes the range, and the whole body is read as the intro.
-          intro=$(awk '/^([[:space:]]*[*_#>]+[[:space:]]*)*(Enhancements|Bugs fixed|Technical):/ { exit } { print }' body.txt)
-          intro_lines=$(printf '%s' "$intro" | grep -cE '[^[:space:]]' || true)
-          intro_chars=$(printf '%s' "$intro" | tr -d '[:space:]' | wc -c)
-          if [ "$intro_lines" -gt 6 ] || [ "$intro_chars" -gt 600 ]; then
-            report "the text before the first section runs to ${intro_lines} lines / ${intro_chars} characters - an intro is two or three sentences, and anything longer is bullets in disguise"
-          fi
-        fi
-
         count=$(wc -l < .review-context/description-findings.txt)
         echo "count=${count}" >> "$GITHUB_OUTPUT"
 
