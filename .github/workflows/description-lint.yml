@@ -59,9 +59,12 @@ jobs:
 
         findings=0
 
-        # $BODY reaches here through the environment rather than through a
-        # ${{ }} interpolation into the script, so a description containing
-        # shell metacharacters is data and not code.
+        # $BODY reaches here through the environment rather than being
+        # interpolated into the script text, so a description containing shell
+        # metacharacters is data and not code. Note that an expression written
+        # out in a comment here would still be evaluated - the whole run block
+        # is expanded before any of it is shell - which is why this says it in
+        # words.
         printf '%s' "$BODY" > body.txt
 
         report() {
