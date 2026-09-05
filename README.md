@@ -45,6 +45,11 @@ matches. The review carries it in an HTML comment at the end of its body,
 which GitHub does not render, so it is invisible to readers and readable from
 the reviews API.
 
+Each of the three says so in the review body, so which one fired is visible
+on the pull request without opening the run log: a full review opens
+**Reviewed** - no findings, a dependency-only approval opens **Not
+reviewed**, and a re-stated verdict opens **Not re-reviewed**.
+
 **It re-states the standing verdict rather than staying silent.** A previous
 approval is re-posted as an approval; a previous request-changes as a
 body-only request-changes saying the findings still stand (the inline
