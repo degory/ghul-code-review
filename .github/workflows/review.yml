@@ -346,6 +346,51 @@ jobs:
         gh pr review "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" \
           --approve --body "Mechanical dependency-only update (version pins only, from this fleet's Renovate instance) — approved without a full review. CI is the gate for whether the bump itself is safe; a source-touching commit on this PR routes back through the full review automatically."
 
+    # A push that leaves the reviewed content identical - a rebase, a merge
+    # from the base branch, a force-push that only rewrites history - gets no
+    # second review. The previous review already covers this content, and on
+    # a repository whose branch protection does not dismiss stale reviews
+    # (the usual setting for this fleet) that review is still the live one:
+    # an approval still counts towards the merge, and outstanding findings
+    # still block. Re-reviewing would spend a full run to re-derive an answer
+    # that is already posted.
+    #
+    # The fingerprint is taken over the diff with its hunk headers and blob
+    # hashes normalised out, so a rebase that shifts line numbers without
+    # changing the change still matches. It is carried in an HTML comment in
+    # the review body, which GitHub does not render, so the marker is
+    # invisible to readers but readable from the reviews API.
+    #
+    # Fails open in every uncertain direction: a review whose body carries no
+    # marker (an older run, or a model that dropped it) simply does not
+    # match, and the review proceeds.
+    - name: Check whether the reviewed content has changed
+      id: content_changed
+      if: github.event_name == 'pull_request' && steps.human_approval.outputs.found != 'true' && steps.dependency_only.outputs.match != 'true'
+      run: |
+        set -euo pipefail
+
+        # Line numbers move under a rebase without the change differing, and
+        # so do the blob hashes on the index line. Neither is part of what a
+        # reviewer read, so neither belongs in the fingerprint.
+        fingerprint=$(sed -E 's/^@@ .* @@.*$/@@/; /^index [0-9a-f]+\.\.[0-9a-f]+/d' .review-context/diff.patch | sha256sum | cut -d' ' -f1)
+        echo "fingerprint=${fingerprint}" >> "$GITHUB_OUTPUT"
+
+        # The newest bot review that carries a marker at all. An APPROVED or
+        # a CHANGES_REQUESTED both count: either verdict is a review of this
+        # content, and both are still live when stale reviews are not
+        # dismissed.
+        previous=$(jq -r --arg m "review-fingerprint: ${fingerprint}" \
+          '[.[] | select(.user.type == "Bot" and (.body // "" | contains($m)))] | length > 0' \
+          .review-context/reviews.json)
+
+        if [ "$previous" = "true" ]; then
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::the reviewed content is unchanged since the last review (fingerprint ${fingerprint:0:12}) - skipping"
+        else
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+        fi
+
     # Resolves the fleet-wide default provider/tier, then which credentials
     # and concrete model the rest of the job uses. Only the secret the
     # selected provider actually needs is read here, so an unconfigured
@@ -358,7 +403,7 @@ jobs:
     # `env:` key.
     - name: Resolve provider, tier and credentials
       id: provider
-      if: steps.human_approval.outputs.found != 'true' && steps.dependency_only.outputs.match != 'true'
+      if: steps.human_approval.outputs.found != 'true' && steps.dependency_only.outputs.match != 'true' && steps.content_changed.outputs.skip != 'true'
       env:
         CLAUDE_OAUTH_TOKEN: ${{ secrets.claude-oauth-token }}
         QWEN_AUTH_TOKEN: ${{ secrets.qwen-auth-token }}
@@ -448,18 +493,21 @@ jobs:
         echo "::notice::code review provider=$PROVIDER tier=$TIER model=$MODEL"
 
     - name: Install claude CLI
-      if: steps.human_approval.outputs.found != 'true' && steps.dependency_only.outputs.match != 'true'
+      if: steps.human_approval.outputs.found != 'true' && steps.dependency_only.outputs.match != 'true' && steps.content_changed.outputs.skip != 'true'
       run: |
         curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_VERSION"
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Run review with live progress and heartbeat watchdog
-      if: steps.human_approval.outputs.found != 'true' && steps.dependency_only.outputs.match != 'true'
+      if: steps.human_approval.outputs.found != 'true' && steps.dependency_only.outputs.match != 'true' && steps.content_changed.outputs.skip != 'true'
       shell: bash
       env:
         # If the caller passed App credentials, post under the App's installation identity.
         # Otherwise fall back to the default GITHUB_TOKEN (github-actions[bot]).
         GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        # Carried into the review body so a later run can tell that the
+        # content it is looking at has already been reviewed.
+        CONTENT_FINGERPRINT: ${{ steps.content_changed.outputs.fingerprint }}
       run: |
         set -uo pipefail
 
@@ -585,6 +633,10 @@ jobs:
         - Do NOT use 'gh pr comment' — that creates an issue comment, not a review.
         - The working directory (e.g. /home/runner/work/<repo>/<repo>) is writeable — Write the JSON there. /tmp is NOT writeable.
         - JSON 'body' fields can contain markdown (including '# headings') — the '#'-at-line-start guard only applies to command-line --body arguments, not to file contents POSTed via --input.
+        - Name the file 'review.json', in the working directory, and write it as soon as you have your first surviving finding — then rewrite it as each further one survives. If this run is killed before it posts (watchdog, job timeout, a stalled provider), whatever is in that file at that moment is posted on your behalf as a partial review; anything you were holding in your head is lost. Writing it once at the end throws that away for nothing.
+        - Put this marker on its own line at the end of the review 'body', in both the approve and the request-changes case, with the value exactly as given:
+            <!-- review-fingerprint: ${CONTENT_FINGERPRINT} -->
+          It records which content this review covers, so a later run over an identical diff (a rebase, a merge from the base branch) can see the content is already reviewed and skip instead of re-deriving your answer. It is an HTML comment, so it does not render. For the approve case that means passing '--body' the LGTM line followed by the marker line, rather than a bare \"LGTM\".
 
         What you are reading vs. what CI gates:
         - You run in parallel with CI, not after it, so its jobs can still be in flight. Whether the diff builds, compiles and passes tests is settled by CI and branch protection before anything merges — that is not your job. Trust the diff as written: do not try to mentally compile it, run tests, or verify reproducibility. Spend your attention on what the test suite cannot catch even when it passes.
@@ -598,6 +650,31 @@ jobs:
         - Docs-only and workflow-only changes are held to the same bar as code. They ship as permanently as code does, and several repos generate their release notes from the squash-merge message. The same bar is not the same amount of work: a small prose or configuration change usually warrants nothing, and reaching that conclusion quickly is the bar being applied, not skipped.
         - A routine mechanical change — a dependency or tool-version bump, a lockfile update, a generated-file refresh — is read for what makes it non-routine: a major-version jump, a change that needs a matching update elsewhere, an edit smuggled in alongside the mechanical one. Finding none of those, approve and move on rather than looking for something to say.
         - An approval with no findings is a good outcome and a common one. It is the review working, not the review giving up, and it is what lets a clean PR merge. Do not treat an empty findings list as a sign you have not looked hard enough.
+
+        Scoring what you found:
+        - Before posting, score every candidate finding from 0 to 100 for how confident you are that it is real and worth acting on, against this scale:
+            0   — a false positive that does not stand up to light scrutiny, or a pre-existing issue this diff did not introduce.
+            25  — it might be real, but you could not verify it; or it is stylistic and not something this repo's own rules call out.
+            50  — verified real, but a nitpick, or rare enough in practice not to matter. Unimportant relative to the rest of the diff.
+            75  — you checked it twice and it will be hit in practice; the approach in the diff is insufficient, or a rule this repo states explicitly names it.
+            100 — confirmed, will happen routinely, and the evidence in front of you directly demonstrates it.
+        - Post only the findings that score 80 or above. Drop the rest entirely — do not mention them in the body, do not soften them into an aside. If nothing scores 80 or above, approve.
+        - Score honestly rather than generously. A finding you talked yourself into is a round trip that costs the author a full CI cycle and returns nothing, and the scale exists to make that a decision rather than a reflex.
+
+        What is not a finding, however true:
+        - A pre-existing issue the diff did not introduce, and a real issue on a line the diff does not touch. Both belong in an issue, not in a review that blocks this PR.
+        - Anything a compiler, type checker, linter or test would catch. Those run separately and gate the merge on their own; you do not need to check them and should not report them.
+        - A pedantic nitpick a senior engineer would not raise in a review.
+        - General code-quality observations — coverage, documentation, security posture in the abstract — unless a rule this repo states explicitly asks for them. In scope because a stated rule names it, not because it is generally good practice.
+        - A change in behaviour that is plainly intentional, or that follows from the broader change the PR is making.
+        - Something a comment or an existing PR comment already explains. Read the pre-fetched comments before concluding a choice is unjustified.
+
+        Before you post, whatever else you found:
+        - These three are cheap to check and are the ones most often left to a later round, which costs the author a full CI cycle to learn. Finding a problem in the code is not a reason to stop before them.
+            - The PR description, against the conventions below and against what the diff actually does. A description that claims something the merged code will not do is a finding; it becomes the permanent commit message.
+            - VERSION, against the bump table. It is one file.
+            - The language or API reference this repo keeps, if the diff changes documented behaviour or adds something a user would look up. A grep, not a read.
+        - Each is still subject to the 80 bar. Checking them is mandatory; reporting them is not.
 
         Source comment hygiene:
         - Comments must stand on their own for a reader who knows the repo but has none of the surrounding context — no PR thread, no issue, no private notes. The default position is no comment; comment where a competent reader would genuinely need context, such as a non-obvious invariant, a subtle ordering requirement, or a workaround whose reason is not visible from the code.
@@ -678,6 +755,62 @@ jobs:
 
         echo "::error::review not posted after ${MAX_ATTEMPTS} attempt(s) — failing the check so the diff is not merged unreviewed"
         exit 1
+
+    # A killed run - idle watchdog, job timeout, provider stall - otherwise
+    # posts nothing at all, and the review is a total loss: the check fails
+    # with no feedback and the author has to push again, paying a whole CI
+    # cycle, to find out what the review would have said. The prompt asks the
+    # review to write its findings to review.json as it reaches them rather
+    # than only at the end, so whatever it had reached is on disk when it
+    # dies. This posts that.
+    #
+    # Never an approval. An approval that was never actually reached is the
+    # one outcome worse than silence, because auto-merge acts on it. A
+    # salvaged review is always REQUEST_CHANGES, and the step leaves the job
+    # failed either way - the salvage is feedback for the author, not a
+    # verdict for the merge gate.
+    - name: Salvage an unposted review
+      if: failure() && steps.human_approval.outputs.found != 'true' && steps.dependency_only.outputs.match != 'true' && steps.content_changed.outputs.skip != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -uo pipefail
+
+        [ -f review.json ] || { echo "no review.json to salvage"; exit 0; }
+        jq -e . review.json >/dev/null 2>&1 || { echo "review.json is not valid JSON — nothing to salvage"; exit 0; }
+
+        findings=$(jq -r '(.comments // []) | length' review.json)
+        summary=$(jq -r '.body // "" | length' review.json)
+        if [ "$findings" = "0" ] && [ "$summary" = "0" ]; then
+          echo "review.json carries no findings — nothing to salvage"
+          exit 0
+        fi
+
+        # The posted event is forced regardless of what the file says, so a
+        # half-written file that happens to carry event APPROVE cannot
+        # approve anything.
+        note="This review was cut short before it finished — the run was killed by the watchdog or the job timeout. What follows is what it had reached, and it does **not** cover the whole diff. The check is failed; push to re-run a full review."
+        jq --arg n "$note" \
+          '.event = "REQUEST_CHANGES" | .body = ($n + "\n\n" + (.body // ""))' \
+          review.json > review-salvaged.json
+
+        if gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" -X POST --input review-salvaged.json ; then
+          echo "::notice::salvaged a partial review with ${findings} finding(s) from a killed run"
+        else
+          # A comments[] entry anchored outside the diff hunks 422s the whole
+          # POST. Falling back to a body-only review keeps the findings
+          # readable rather than losing them to a formatting rejection.
+          echo "::warning::salvage POST rejected — retrying with the findings in the body"
+          jq --arg n "$note" \
+            '{event: "REQUEST_CHANGES", body: ($n + "\n\n" + (.body // "") + "\n\n" + ((.comments // []) | map("- **" + .path + ":" + ((.line // 0) | tostring) + "** — " + .body) | join("\n\n")))}' \
+            review.json > review-salvaged-body.json
+          gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" -X POST --input review-salvaged-body.json \
+            && echo "::notice::salvaged a partial review as a body-only review" \
+            || echo "::warning::salvage failed — the run posted nothing"
+        fi
 
     # always(), because the runs worth reading are the ones that failed or were
     # killed. Artifacts are uploaded verbatim and secret masking does not apply to

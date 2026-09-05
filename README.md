@@ -26,6 +26,50 @@ review` / `gh api` / `date` / `git log` / `wc`, and subagent tools (`Agent`,
 multiplies its token cost and exhausts the job timeout before it posts
 anything, which leaves the PR blocked on a review nobody can read.
 
+## When a review is skipped
+
+Three gates run before the model is ever started, in this order. Each is a
+whole run's cost avoided.
+
+- **A human has approved.** See 'Human override' below.
+- **A mechanical dependency-only Renovate PR.** Version-pin files only, from
+  this fleet's own Renovate instance; approved directly.
+- **The reviewed content has not changed since the last review.** A rebase, a
+  merge from the base branch, or a force-push that only rewrites history
+  produces the same diff, and the review already posted still covers it.
+
+The last of those is a fingerprint over the diff with hunk headers and blob
+hashes normalised out, so a rebase that only shifts line numbers still
+matches. The review carries it in an HTML comment at the end of its body,
+which GitHub does not render, so it is invisible to readers and readable from
+the reviews API.
+
+It relies on the calling repo's branch protection **not** dismissing stale
+reviews — the usual setting across this fleet — because the point is that the
+already-posted review is still the live one: an approval still counts towards
+the merge, and outstanding findings still block. Where stale reviews *are*
+dismissed, turn this off by ensuring the marker never matches, or the PR will
+sit needing an approval that no longer exists.
+
+Every uncertain direction fails open. A review whose body carries no marker —
+one posted before this existed, or a run where the model dropped it — does not
+match, and the review proceeds as normal.
+
+## When a review is killed
+
+The idle watchdog, the job timeout, or a stalled provider can kill a run
+before it posts. That used to lose the review entirely: the check failed with
+no feedback, and the author had to push again — paying a full CI cycle — to
+find out what it would have said.
+
+The review is asked to write its findings to `review.json` as it reaches them
+rather than only at the end, and a salvage step posts whatever is in that file
+when a run dies. A salvaged review is always `REQUEST_CHANGES`, never an
+approval — an approval that was never actually reached is worse than silence,
+because auto-merge acts on it — and it says at the top that it did not cover
+the whole diff. The job stays failed either way: the salvage is feedback for
+the author, not a verdict for the merge gate.
+
 ## Providers
 
 | `provider` | Endpoint | Auth secret |
@@ -151,6 +195,23 @@ The workflow owns the posting mechanics — it prepends runtime notes to the
 prompt directing the model to approve when clean or post a request-changes
 review with inline findings otherwise, so the caller's `prompt` only needs to
 supply the review brief (what to flag), not how to post it.
+
+It also owns the precision bar, which is fleet-wide rather than per-repo.
+Every candidate finding is scored 0-100 against a fixed scale, and only those
+at 80 or above are posted; the rest are dropped rather than softened into
+asides. Alongside the scale is a list of things that are not findings however
+true they are — a pre-existing issue, a real issue on a line the diff does not
+touch, anything a compiler or test would catch, a nitpick a senior engineer
+would not raise. Generating and then filtering turns out to be more reliable
+than asking the model not to generate low-value findings in the first place,
+because the filter is a separate judgement against an explicit bar.
+
+The same section carries a short mandatory tail check — the PR description
+against what the diff actually does, the VERSION file, and the repo's own
+reference documentation. These are cheap, and they are the ones a review most
+often leaves to a later round, which costs the author a whole CI cycle to
+learn. Checking them is mandatory; reporting them is still subject to the 80
+bar.
 
 The `permissions:` block on the calling job is required: this workflow declares
 `pull-requests: write` so it can post the review, and the caller must grant at
