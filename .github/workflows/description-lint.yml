@@ -105,6 +105,20 @@ jobs:
           report "no 'Enhancements:' / 'Bugs fixed:' / 'Technical:' section - at least one is required"
         fi
 
+        # A brief introductory paragraph before the first section is allowed.
+        # Whether it is aimed at a reader of the release notes rather than at
+        # the reviewer is a judgement the reviewer makes; length is the part a
+        # grep can settle, and the threshold is deliberately generous so that
+        # only an actual essay trips it.
+        if grep -qE '^(Enhancements|Bugs fixed|Technical):' body.txt ; then
+          intro=$(sed -n '1,/^\(Enhancements\|Bugs fixed\|Technical\):/p' body.txt | sed '$d')
+          intro_lines=$(printf '%s' "$intro" | grep -cE '[^[:space:]]' || true)
+          intro_chars=$(printf '%s' "$intro" | tr -d '[:space:]' | wc -c)
+          if [ "$intro_lines" -gt 6 ] || [ "$intro_chars" -gt 600 ]; then
+            report "the text before the first section runs to ${intro_lines} lines / ${intro_chars} characters - an intro is two or three sentences, and anything longer is bullets in disguise"
+          fi
+        fi
+
         if [ "$findings" -eq 0 ]; then
           printf 'Nothing to fix.\n' >> "$GITHUB_STEP_SUMMARY"
           echo "PR description lint: clean"
