@@ -495,8 +495,12 @@ jobs:
         # not a missing section, and reporting it as one sends the author looking
         # for something that is already there. Section labels are plain text: the
         # description ships as the commit message, where the markup is noise.
+        # '|| true' is load-bearing, not defensive. This step runs under the
+        # runner's 'bash -e' and sets pipefail, so the grep finding nothing -
+        # which is what a well-formed description looks like - would fail the
+        # pipeline and end the step before any check reported anything.
         marked_up=$(grep -oE '^([[:space:]]*[*_#>]+[[:space:]]*)+(Enhancements|Bugs fixed|Technical):?[*_[:space:]]*$' body.txt \
-          | head -3 | sed -E "s/^[[:space:]]*|[[:space:]]*$//g; s/^/'/; s/$/'/" | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+          | head -3 | sed -E "s/^[[:space:]]*|[[:space:]]*$//g; s/^/'/; s/$/'/" | tr '\n' ',' | sed 's/,$//; s/,/, /g' || true)
 
         if [ -n "$marked_up" ]; then
           report "section label(s) carrying markdown: ${marked_up} - the labels are plain text, so write 'Enhancements:' rather than marking it up as a heading or in bold"
