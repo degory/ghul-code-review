@@ -307,8 +307,11 @@ jobs:
         head_ref=$(jq -r '.headRefName' .review-context/pr.json)
         body=$(jq -r '.body' .review-context/pr.json)
 
+        # gh's --json author reports a GitHub App actor's login with an
+        # "app/" prefix (e.g. "app/ghul-coder"), not the "ghul-coder[bot]"
+        # form the REST API and the PR/commit UI use.
         looks_like_renovate=false
-        if [ "$author" = "ghul-coder[bot]" ] \
+        if [ "$author" = "app/ghul-coder" ] \
           && [[ "$head_ref" == renovate/* ]] \
           && grep -q '<!--renovate-debug:' <<< "$body"; then
           looks_like_renovate=true
