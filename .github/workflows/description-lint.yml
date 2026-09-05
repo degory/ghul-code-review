@@ -1,0 +1,130 @@
+name: PR description lint
+
+# Mechanical checks on a pull request description, as a reusable workflow.
+#
+# These are the conventions the review workflow's shared prompt already
+# states, checked by grep rather than by a model. They live here, next to the
+# prompt that states them, so a repo picking up the convention does not also
+# pick up a copy of the rules that can drift out of step with it.
+#
+# Why check them separately at all, when the reviewer would also catch them:
+# a description finding raised by the reviewer costs a review round and a full
+# CI cycle to fix, and across one sample of the compiler repo's pull requests
+# the description was the single most common thing raised in a *second or
+# later* round. Caught here it costs seconds and no tokens, and the reviewer's
+# attention stays on the diff.
+#
+# The description becomes the squash-merge commit message and the changelog
+# entry, so what it says ships permanently - which is why this is worth a
+# check of its own rather than a note somewhere.
+#
+# Consumers:
+#   jobs:
+#     description_lint:
+#       if: ${{ github.event_name == 'pull_request' }}
+#       uses: degory/ghul-code-review/.github/workflows/description-lint.yml@v7
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: "Runner label. The job is a handful of greps, so the cheapest one will do."
+        type: string
+        default: ubuntu-latest
+      require-section:
+        description: >-
+          Require at least one 'Enhancements:' / 'Bugs fixed:' / 'Technical:'
+          section. Off for repos that do not generate release notes from the
+          squash-merge message.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  lint:
+    name: PR description lint
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 5
+    steps:
+    - name: Check the description
+      env:
+        BODY: ${{ github.event.pull_request.body }}
+        TITLE: ${{ github.event.pull_request.title }}
+        REQUIRE_SECTION: ${{ inputs.require-section }}
+      run: |
+        set -uo pipefail
+
+        findings=0
+
+        # $BODY reaches here through the environment rather than through a
+        # ${{ }} interpolation into the script, so a description containing
+        # shell metacharacters is data and not code.
+        printf '%s' "$BODY" > body.txt
+
+        report() {
+          printf '::error title=PR description::%s\n' "$1"
+          printf '  - %s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+          findings=$((findings + 1))
+        }
+
+        check() {
+          local pattern=$1 message=$2
+          grep -qiE "$pattern" body.txt && report "$message"
+        }
+
+        printf '### PR description lint\n\n' >> "$GITHUB_STEP_SUMMARY"
+
+        check '^##+ *(summary|test plan|testing)' \
+          "'## Summary' / '## Test plan' heading - the description is the summary, so the heading says nothing"
+        check '^co-authored-by:' \
+          "Co-authored-by trailer in the body - squash-merge appends a deduped one, so this ships twice"
+        check '(pass(es|ed)? locally|all [0-9]+ .*tests? pass|bootstrap green|tested locally)' \
+          "local test results in the body - CI is the proof of what shipped, and the claim is unverifiable in the commit log"
+        check '(phase [0-9]|stage [0-9]|predecessor branch|option [ABC]\b|follow-up PR [0-9])' \
+          "internal label in the body - meaningless to someone reading the commit log later"
+        check '#(minor|major)\b' \
+          "#minor/#major marker is a no-op - raise the VERSION file instead"
+
+        grep -qF '🤖 Generated with' body.txt && report "Claude Code footer in the body"
+        grep -qE 'claude\.ai/code/session_' body.txt && report "session URL in the body"
+        grep -qE '(docs/claude|PENDING-PRS|memory file|CLAUDE\.md)' body.txt && report "private reference in the body"
+        grep -qE '/home/[a-z0-9_-]+/|worktrees/' body.txt && report "local filesystem path in the body"
+
+        # The title is repeated on the squash-merge subject line, so a body
+        # that opens by restating it ships the same sentence twice.
+        first_line=$(head -1 body.txt | sed -E 's/^#+ *//; s/[[:space:]]+$//')
+        if [ -n "$first_line" ] && [ "$first_line" = "$TITLE" ]; then
+          report "the first body line repeats the title - squash-merge already puts the title on the subject line"
+        fi
+
+        if [ "$REQUIRE_SECTION" = "true" ] \
+          && ! grep -qE '^(Enhancements|Bugs fixed|Technical):' body.txt ; then
+          report "no 'Enhancements:' / 'Bugs fixed:' / 'Technical:' section - at least one is required"
+        fi
+
+        # A brief introductory paragraph before the first section is allowed.
+        # Whether it is aimed at a reader of the release notes rather than at
+        # the reviewer is a judgement the reviewer makes; length is the part a
+        # grep can settle, and the threshold is deliberately generous so that
+        # only an actual essay trips it.
+        if grep -qE '^(Enhancements|Bugs fixed|Technical):' body.txt ; then
+          intro=$(sed -n '1,/^\(Enhancements\|Bugs fixed\|Technical\):/p' body.txt | sed '$d')
+          intro_lines=$(printf '%s' "$intro" | grep -cE '[^[:space:]]' || true)
+          intro_chars=$(printf '%s' "$intro" | tr -d '[:space:]' | wc -c)
+          if [ "$intro_lines" -gt 6 ] || [ "$intro_chars" -gt 600 ]; then
+            report "the text before the first section runs to ${intro_lines} lines / ${intro_chars} characters - an intro is two or three sentences, and anything longer is bullets in disguise"
+          fi
+        fi
+
+        if [ "$findings" -eq 0 ]; then
+          printf 'Nothing to fix.\n' >> "$GITHUB_STEP_SUMMARY"
+          echo "PR description lint: clean"
+          exit 0
+        fi
+
+        printf '\nThe description becomes the squash-merge commit message and the changelog entry, so it ships permanently.\n' >> "$GITHUB_STEP_SUMMARY"
+        echo "PR description lint: ${findings} finding(s)"
+        exit 1
