@@ -517,7 +517,11 @@ jobs:
         # a judgement the model makes; length is the part a grep can settle,
         # and the threshold is generous enough that only an essay trips it.
         if grep -qE '^([[:space:]]*[*_#>]+[[:space:]]*)*(Enhancements|Bugs fixed|Technical):' body.txt ; then
-          intro=$(sed -n '1,/^\([[:space:]]*[*_#>]\+[[:space:]]*\)*\(Enhancements\|Bugs fixed\|Technical\):/p' body.txt | sed '$d')
+          # awk rather than sed's '1,/re/': that range searches for its end
+          # pattern from the second line on, so a description opening directly
+          # with a section label - which is the shape the conventions ask for -
+          # never closes the range, and the whole body is read as the intro.
+          intro=$(awk '/^([[:space:]]*[*_#>]+[[:space:]]*)*(Enhancements|Bugs fixed|Technical):/ { exit } { print }' body.txt)
           intro_lines=$(printf '%s' "$intro" | grep -cE '[^[:space:]]' || true)
           intro_chars=$(printf '%s' "$intro" | tr -d '[:space:]' | wc -c)
           if [ "$intro_lines" -gt 6 ] || [ "$intro_chars" -gt 600 ]; then
