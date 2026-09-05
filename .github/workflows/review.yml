@@ -344,7 +344,9 @@ jobs:
       run: |
         set -euo pipefail
         gh pr review "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" \
-          --approve --body "Mechanical dependency-only update (version pins only, from this fleet's Renovate instance) — approved without a full review. CI is the gate for whether the bump itself is safe; a source-touching commit on this PR routes back through the full review automatically."
+          --approve --body "**Not reviewed** - mechanical dependency-only update: version-pin files only, from this fleet's own Renovate instance, so the model was not run.
+
+        CI is the gate for whether the bump itself is safe. A source-touching commit on this pull request routes back through the full review automatically."
 
     # A push that leaves the reviewed content identical - a rebase, a merge
     # from the base branch, a force-push that only rewrites history - gets no
@@ -420,12 +422,12 @@ jobs:
         marker="<!-- review-fingerprint: ${FINGERPRINT} -->"
 
         if [ "$PREVIOUS_STATE" = "APPROVED" ]; then
-          body="LGTM - unchanged since the last review of this content, so that approval stands.
+          body="**Not re-reviewed** - the diff is unchanged since the last review, so the model was not run and that approval stands.
 
         ${marker}"
           jq -n --arg b "$body" '{event: "APPROVE", body: $b}' > restate.json
         else
-          body="The findings from the previous review still stand: nothing in the reviewed content has changed since it, so they have not been addressed. They are on that review, inline.
+          body="**Not re-reviewed** - the diff is unchanged since the previous review, so the model was not run and its findings still stand. They are on that review, inline.
 
         ${marker}"
           jq -n --arg b "$body" '{event: "REQUEST_CHANGES", body: $b}' > restate.json
@@ -658,7 +660,7 @@ jobs:
             .review-context/reviews.json        — prior PR reviews (use to acknowledge already-resolved findings, avoid duplicates)
             .review-context/review-comments.json — prior inline review comments
         - Post exactly one formal PR Review per run. The event is a binary choice on whether you are raising anything at all:
-            - Nothing to raise -> approve: gh pr review <PR-number> --approve --body \"LGTM\". Approval is the merge signal (branch protection can require an approving review of the latest changes and auto-merge waits on it), so always post it explicitly rather than staying silent — a skipped review is indistinguishable from a stuck bot.
+            - Nothing to raise -> approve, with a body that opens '**Reviewed** - no findings.' so that a full review is distinguishable at a glance from the runs that approve without starting the model at all. Approval is the merge signal (branch protection can require an approving review of the latest changes and auto-merge waits on it), so always post it explicitly rather than staying silent — a skipped review is indistinguishable from a stuck bot.
             - One or more findings, of any severity -> write a JSON file (e.g. review.json) and POST it via the reviews endpoint with event REQUEST_CHANGES:
                 gh api repos/<OWNER>/<REPO>/pulls/<PR-number>/reviews -X POST --input review.json
               The JSON shape:
@@ -679,7 +681,7 @@ jobs:
         - Name the file 'review.json', in the working directory, and write it as soon as you have your first surviving finding — then rewrite it as each further one survives. If this run is killed before it posts (watchdog, job timeout, a stalled provider), whatever is in that file at that moment is posted on your behalf as a partial review; anything you were holding in your head is lost. Writing it once at the end throws that away for nothing.
         - Put this marker on its own line at the end of the review 'body', in both the approve and the request-changes case, with the value exactly as given:
             <!-- review-fingerprint: ${CONTENT_FINGERPRINT} -->
-          It records which content this review covers, so a later run over an identical diff (a rebase, a merge from the base branch) can see the content is already reviewed and skip instead of re-deriving your answer. It is an HTML comment, so it does not render. For the approve case that means passing '--body' the LGTM line followed by the marker line, rather than a bare \"LGTM\".
+          It records which content this review covers, so a later run over an identical diff (a rebase, a merge from the base branch) can see the content is already reviewed and skip instead of re-deriving your answer. It is an HTML comment, so it does not render. For the approve case that means passing '--body' the '**Reviewed** - no findings.' line followed by the marker line.
 
         What you are reading vs. what CI gates:
         - You run in parallel with CI, not after it, so its jobs can still be in flight. Whether the diff builds, compiles and passes tests is settled by CI and branch protection before anything merges — that is not your job. Trust the diff as written: do not try to mentally compile it, run tests, or verify reproducibility. Spend your attention on what the test suite cannot catch even when it passes.
