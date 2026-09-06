@@ -32,8 +32,8 @@ Three gates run before the model is ever started, in this order. Each is a
 whole run's cost avoided, and none of them leaves the PR without a review.
 
 - **A human has approved.** See 'Human override' below.
-- **A mechanical dependency-only Renovate PR.** Version-pin files only, from
-  this fleet's own Renovate instance; approved directly.
+- **A mechanical dependency-only bot PR.** Version-pin files only, from
+  Renovate or Dependabot; approved directly.
 - **The reviewed content has not changed since the last review.** A rebase, a
   merge from the base branch, or a force-push that only rewrites history
   produces the same diff, and the last review already covers it — so that
