@@ -309,9 +309,9 @@ jobs:
           echo "::notice::a human reviewer has already approved this PR — skipping the automated review"
         fi
 
-    # A pins-only PR from this fleet's own Renovate instance is approved
-    # here directly rather than by the model. Detection is a heuristic
-    # (author + branch prefix + PR-description marker), not proof - see
+    # A pins-only PR from a dependency bot is approved here directly rather
+    # than by the model. Detection is a heuristic (author + branch prefix,
+    # plus a PR-description marker for Renovate), not proof - see
     # degory/ghul#2006. Any file outside the allowlist below falls through
     # to the full review as normal.
     - name: Check for a mechanical dependency-only change
@@ -327,11 +327,20 @@ jobs:
         # gh's --json author reports a GitHub App actor's login with an
         # "app/" prefix (e.g. "app/ghul-coder"), not the "ghul-coder[bot]"
         # form the REST API and the PR/commit UI use.
-        looks_like_renovate=false
+        #
+        # Renovate runs as this fleet's own App, which also opens ordinary
+        # pull requests, so the branch prefix and the description marker are
+        # what separate a Renovate run from the rest of that App's work.
+        # Dependabot is GitHub's own App and opens nothing else, so its
+        # author and branch prefix identify it on their own.
+        looks_like_dependency_bot=false
         if [ "$author" = "app/ghul-coder" ] \
           && [[ "$head_ref" == renovate/* ]] \
           && grep -q '<!--renovate-debug:' <<< "$body"; then
-          looks_like_renovate=true
+          looks_like_dependency_bot=true
+        elif [ "$author" = "app/dependabot" ] \
+          && [[ "$head_ref" == dependabot/* ]]; then
+          looks_like_dependency_bot=true
         fi
 
         # Version-pin files only. Workflow YAML is deliberately excluded -
@@ -347,9 +356,9 @@ jobs:
           fi
         done < <(jq -r '.files[].path' .review-context/pr.json)
 
-        if [ "$looks_like_renovate" = "true" ] && [ "$only_pins" = "true" ]; then
+        if [ "$looks_like_dependency_bot" = "true" ] && [ "$only_pins" = "true" ]; then
           echo "match=true" >> "$GITHUB_OUTPUT"
-          echo "::notice::mechanical dependency-only Renovate PR (pins/version files only) — approving without a full review"
+          echo "::notice::mechanical dependency-only bot PR (pins/version files only) — approving without a full review"
         else
           echo "match=false" >> "$GITHUB_OUTPUT"
         fi
@@ -361,7 +370,7 @@ jobs:
       run: |
         set -euo pipefail
         gh pr review "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" \
-          --approve --body "**Not reviewed** - mechanical dependency-only update: version-pin files only, from this fleet's own Renovate instance, so the model was not run.
+          --approve --body "**Not reviewed** - mechanical dependency-only update: version-pin files only, from a dependency bot, so the model was not run.
 
         CI is the gate for whether the bump itself is safe. A source-touching commit on this pull request routes back through the full review automatically."
 
