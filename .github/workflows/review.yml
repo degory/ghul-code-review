@@ -217,14 +217,14 @@ jobs:
       MAX_ATTEMPTS: ${{ inputs.max-attempts }}
       CLAUDE_VERSION: ${{ inputs.claude-version }}
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 1
 
     - name: Mint App installation token
       id: app-token
       if: ${{ inputs.gh-app-id != '' }}
-      uses: actions/create-github-app-token@v2
+      uses: actions/create-github-app-token@v3
       with:
         app-id: ${{ inputs.gh-app-id }}
         private-key: ${{ secrets.gh-app-private-key }}
@@ -1152,7 +1152,7 @@ jobs:
 
     - name: Upload review transcript
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: review-transcript-${{ github.run_id }}-${{ github.run_attempt }}
         path: ${{ runner.temp }}/review-logs/
