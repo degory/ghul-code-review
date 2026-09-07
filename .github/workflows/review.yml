@@ -257,6 +257,7 @@ jobs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         REPO: ${{ github.repository }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         set -euo pipefail
         mkdir -p .review-context
@@ -288,6 +289,42 @@ jobs:
         gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" > .review-context/comments.json
         gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews"   > .review-context/reviews.json
         gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments"  > .review-context/review-comments.json
+
+        # The reviewer is re-run on every push and each run is a fresh context,
+        # so what it reads is the whole diff again with nothing marking which
+        # hunks answer its last review. This is that marker: the diff from the
+        # commit the previous review was posted against to the current head.
+        # It is a pointer into diff.patch rather than a replacement for it -
+        # the verdict is on the merged result, and a later push can break code
+        # an earlier round read and passed.
+        #
+        # Written only when it says something diff.patch does not. There is no
+        # previous review on the first run; and after a force-push the merge
+        # base is the branch point again, so the compare reproduces the full
+        # diff, which is dropped rather than written out as a second copy.
+        # A COMMENTED review is excluded because that is what the pull
+        # request's own author posts when replying to findings - GitHub
+        # refuses an author an approval or a change request, so the two
+        # verdicts this workflow posts are the two an author cannot. Taking
+        # the newest bot review of any state would sometimes anchor on the
+        # author's reply instead, and land on a commit newer than the one the
+        # reviewer last saw - hiding hunks it has never read.
+        previous_sha=$(
+          jq -r '[.[] | select(.user.type == "Bot" and .state != "COMMENTED") | .commit_id // empty] | last // empty' \
+            .review-context/reviews.json
+        )
+
+        if [ -n "$previous_sha" ] && [ "$previous_sha" != "$HEAD_SHA" ] ; then
+          if gh api "repos/${REPO}/compare/${previous_sha}...${HEAD_SHA}" \
+               -H "Accept: application/vnd.github.diff" \
+               > .review-context/since-last-review.patch 2>/dev/null \
+             && [ -s .review-context/since-last-review.patch ] \
+             && ! cmp -s .review-context/since-last-review.patch .review-context/diff.patch ; then
+            echo "diff since the previous review: ${previous_sha:0:12}..${HEAD_SHA:0:12}"
+          else
+            rm -f .review-context/since-last-review.patch
+          fi
+        fi
         echo "Pre-fetched PR context:"
         ls -lh .review-context/
 
@@ -851,6 +888,7 @@ jobs:
             .review-context/comments.json       — top-level issue comments on the PR
             .review-context/reviews.json        — prior PR reviews (use to acknowledge already-resolved findings, avoid duplicates)
             .review-context/review-comments.json — prior inline review comments
+            .review-context/since-last-review.patch — present only when there is a previous review and the branch has moved since: the diff from the commit that review was posted against to the current head, which is the author's response to it. Read it to locate what changed rather than re-deriving it from the commit list. It is a pointer into diff.patch, not a substitute — diff.patch is what you are reviewing and what your verdict covers, since a later push can break code an earlier round read and passed.
         - Post exactly one formal PR Review per run. The event is a binary choice on whether you are raising anything at all:
             - Nothing to raise, and no pre-seeded review.json -> approve, with a body that opens '**Reviewed** - no findings.' so that a full review is distinguishable at a glance from the runs that approve without starting the model at all. Approval is the merge signal (branch protection can require an approving review of the latest changes and auto-merge waits on it), so always post it explicitly rather than staying silent — a skipped review is indistinguishable from a stuck bot.
             - One or more findings, of any severity -> write a JSON file (e.g. review.json) and POST it via the reviews endpoint with event REQUEST_CHANGES:
