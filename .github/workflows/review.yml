@@ -298,7 +298,7 @@ jobs:
         # content from another repository. Callers gate their own triggers on
         # the head repo; this restates it here because a manual dispatch
         # carries no event context to gate on, and it holds for every path.
-        head_full=$(jq -r '.headRepository.owner.login + "/" + .headRepository.name' .review-context/pr.json)
+        head_full=$(jq -r '.headRepository.nameWithOwner // ""' .review-context/pr.json)
         if [ "$head_full" != "$REPO" ]; then
           echo "::error::PR #$PR_NUMBER's head is $head_full, not $REPO - not reviewing a fork's pull request"
           exit 1
