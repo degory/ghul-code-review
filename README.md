@@ -255,7 +255,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: degory/ghul-code-review/.github/workflows/review.yml@v4
+    uses: degory/ghul-code-review/.github/workflows/review.yml@v11
     with:
       prompt: |
         Review pull request #${{ github.event.pull_request.number }} on ${{ github.repository }}.
@@ -266,6 +266,15 @@ jobs:
       claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       qwen-auth-token: ${{ secrets.QWEN_AUTH_TOKEN }}
 ```
+
+### Version tags
+
+The current major tag floats. A non-breaking change merges to `main` and then
+re-points it (`git tag -fa v11 -m "..." && git push -f origin v11`); consumer
+repos pick the change up on their next run, with no rollout. A new major tag is
+cut only for a breaking change - one whose inputs or contract force callers to
+change - because that is the only change worth the coordinated bump of every
+consumer.
 
 Passing both secrets (when both are available) is what makes a fleet-wide
 provider switch (edit `fleet.json`, push) free for this repo too — the
