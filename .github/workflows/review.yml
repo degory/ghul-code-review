@@ -287,11 +287,22 @@ jobs:
         # context, so a manual dispatch - whose event carries no pull request
         # - reads the same context as a PR-triggered run.
         gh pr view "$PR_NUMBER" --repo "$REPO" \
-          --json number,title,body,baseRefName,headRefName,baseRefOid,headRefOid,additions,deletions,changedFiles,author,labels,commits,files \
+          --json number,title,body,baseRefName,headRefName,baseRefOid,headRefOid,headRepository,additions,deletions,changedFiles,author,labels,commits,files \
           > .review-context/pr.json
         BASE_SHA=$(jq -r .baseRefOid .review-context/pr.json)
         HEAD_SHA=$(jq -r .headRefOid .review-context/pr.json)
         export BASE_SHA HEAD_SHA
+
+        # The review reads the PR's diff and description with this repo's
+        # secrets in reach and posts back to it, so it never runs against
+        # content from another repository. Callers gate their own triggers on
+        # the head repo; this restates it here because a manual dispatch
+        # carries no event context to gate on, and it holds for every path.
+        head_full=$(jq -r '.headRepository.owner.login + "/" + .headRepository.name' .review-context/pr.json)
+        if [ "$head_full" != "$REPO" ]; then
+          echo "::error::PR #$PR_NUMBER's head is $head_full, not $REPO - not reviewing a fork's pull request"
+          exit 1
+        fi
 
         # GitHub's diff endpoint refuses any diff of more than 300 files, so a
         # large mechanical change - a mass rename, a sweeping cleanup - would
