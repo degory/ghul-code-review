@@ -452,11 +452,13 @@ jobs:
         fingerprint=$(sha256sum < .review-context/fingerprint-input | cut -d' ' -f1)
         echo "fingerprint=${fingerprint}" >> "$GITHUB_OUTPUT"
 
-        # The newest bot review carrying this fingerprint, and what it
+        # The newest live bot review carrying this fingerprint, and what it
         # decided. Either verdict counts: both are a review of this exact
-        # content.
+        # content. A dismissed review is not live - dismissal withdraws the
+        # verdict, so a rerun after one re-reviews this content instead of
+        # re-posting what was withdrawn.
         previous=$(jq -r --arg m "review-fingerprint: ${fingerprint}" \
-          'last(.[] | select(.user.type == "Bot" and (.body // "" | contains($m))) | .state) // ""' \
+          'last(.[] | select(.user.type == "Bot" and .state != "DISMISSED" and (.body // "" | contains($m))) | .state) // ""' \
           .review-context/reviews.json)
 
         if [ -n "$previous" ]; then
