@@ -38,6 +38,16 @@ name: Code review
 #       secrets:
 #         claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 #         qwen-auth-token: ${{ secrets.QWEN_AUTH_TOKEN }}
+#
+# A manually dispatched run reviews one pull request in full: the
+# `pull-request-number` input overrides the event context, and the run
+# skips the two mechanical short-circuits - the content-fingerprint
+# re-post and the dependency-bot fast path - so the model re-reads the
+# whole PR, whatever happened on the run that posted the standing verdict.
+# It is the un-stick path: when an automatic run answered with something
+# the author has since fixed in the description or answered in a comment,
+# dispatching rather than re-running the event's own job guarantees a
+# fresh verdict instead of a repetition of the old one.
 
 on:
   workflow_call:
@@ -170,6 +180,16 @@ on:
         description: "Additional repository names (newline- or comma-separated, same owner) the App token should reach, for prompts that read a file from a sibling repo. The calling repository is always included."
         type: string
         default: ""
+      pull-request-number:
+        description: >-
+          Number of the pull request to review, for a run dispatched manually
+          on a caller workflow: it overrides the event context, and the run
+          skips every mechanical short-circuit - the content-fingerprint
+          re-post and the dependency-bot fast path - to review the PR in
+          full. Empty (the normal case) takes the number and the
+          short-circuits from the pull_request event.
+        type: string
+        default: ""
     secrets:
       claude-oauth-token:
         description: "OAuth token for Anthropic's own API (CLAUDE_CODE_OAUTH_TOKEN). Required when provider resolves to 'anthropic'."
@@ -201,6 +221,9 @@ jobs:
     # not a state to merge from — better to block and re-run than to let it
     # through on the strength of CI alone.
     env:
+      # The PR number this run reviews: an explicit input wins (a manually
+      # dispatched run), else the pull_request event's number.
+      PR_NUMBER: ${{ inputs.pull-request-number || github.event.pull_request.number }}
       # Raw, unfallen-back values only - the full anthropic/medium fallback
       # chain runs in the "Resolve provider, tier and credentials" step below,
       # because fleet.json (fetched there) sits between the repo-level
@@ -251,16 +274,24 @@ jobs:
         gh api repos/degory/ghul-style/contents/STYLE.md -H "Accept: application/vnd.github.raw" > STYLE.md
 
     - name: Pre-fetch PR context
-      if: github.event_name == 'pull_request'
+      if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
       env:
         GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_NUMBER: ${{ env.PR_NUMBER }}
         REPO: ${{ github.repository }}
-        BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         set -euo pipefail
         mkdir -p .review-context
+
+        # The base and head SHAs come from the API rather than the event
+        # context, so a manual dispatch - whose event carries no pull request
+        # - reads the same context as a PR-triggered run.
+        gh pr view "$PR_NUMBER" --repo "$REPO" \
+          --json number,title,body,baseRefName,headRefName,baseRefOid,headRefOid,additions,deletions,changedFiles,author,labels,commits,files \
+          > .review-context/pr.json
+        BASE_SHA=$(jq -r .baseRefOid .review-context/pr.json)
+        HEAD_SHA=$(jq -r .headRefOid .review-context/pr.json)
+        export BASE_SHA HEAD_SHA
 
         # GitHub's diff endpoint refuses any diff of more than 300 files, so a
         # large mechanical change - a mass rename, a sweeping cleanup - would
@@ -269,13 +300,15 @@ jobs:
         # commit reproduces the same changes. The history has to be deepened
         # first, which is why that is done here and not by checking out in full:
         # every other review pays for a shallow clone and only this path does
-        # not.
+        # not. (A manual dispatch checks out the branch it was dispatched
+        # on, and diffs BASE_SHA against HEAD_SHA from the API, so it reads
+        # the PR's own diff either way.)
         if ! gh pr diff "$PR_NUMBER" --repo "$REPO" > .review-context/diff.patch 2>.review-context/diff.err ; then
           if grep -q "exceeded the maximum number of files" .review-context/diff.err ; then
             echo "diff exceeds GitHub's 300 file limit; computing it locally"
             git fetch --quiet --unshallow 2>/dev/null || git fetch --quiet --deepen=2000 2>/dev/null || true
             git fetch --quiet origin "$BASE_SHA" 2>/dev/null || true
-            git diff "$BASE_SHA" HEAD > .review-context/diff.patch
+            git diff "$BASE_SHA" "$HEAD_SHA" > .review-context/diff.patch
           else
             cat .review-context/diff.err >&2
             exit 1
@@ -283,9 +316,6 @@ jobs:
         fi
         rm -f .review-context/diff.err
 
-        gh pr view   "$PR_NUMBER" --repo "$REPO" \
-          --json number,title,body,baseRefName,headRefName,additions,deletions,changedFiles,author,labels,commits,files \
-          > .review-context/pr.json
         gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" > .review-context/comments.json
         gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews"   > .review-context/reviews.json
         gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments"  > .review-context/review-comments.json
@@ -337,7 +367,7 @@ jobs:
     # reviewer's still-active approval in the aggregate review decision.
     - name: Check for a prior human approval
       id: human_approval
-      if: github.event_name == 'pull_request'
+      if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
       run: |
         set -euo pipefail
         found=$(jq -r '[.[] | select(.user.type != "Bot" and .state == "APPROVED")] | length > 0' .review-context/reviews.json)
@@ -406,7 +436,7 @@ jobs:
         GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
       run: |
         set -euo pipefail
-        gh pr review "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" \
+        gh pr review "${{ env.PR_NUMBER }}" --repo "${{ github.repository }}" \
           --approve --body "**Not reviewed** - mechanical dependency-only update: version-pin files only, from a dependency bot, so the model was not run.
 
         CI is the gate for whether the bump itself is safe. A source-touching commit on this pull request routes back through the full review automatically."
@@ -452,11 +482,13 @@ jobs:
         fingerprint=$(sha256sum < .review-context/fingerprint-input | cut -d' ' -f1)
         echo "fingerprint=${fingerprint}" >> "$GITHUB_OUTPUT"
 
-        # The newest bot review carrying this fingerprint, and what it
+        # The newest live bot review carrying this fingerprint, and what it
         # decided. Either verdict counts: both are a review of this exact
-        # content.
+        # content. A dismissed review is not live - dismissal withdraws the
+        # verdict, so a rerun after one re-reviews this content instead of
+        # re-posting what was withdrawn.
         previous=$(jq -r --arg m "review-fingerprint: ${fingerprint}" \
-          'last(.[] | select(.user.type == "Bot" and (.body // "" | contains($m))) | .state) // ""' \
+          'last(.[] | select(.user.type == "Bot" and .state != "DISMISSED" and (.body // "" | contains($m))) | .state) // ""' \
           .review-context/reviews.json)
 
         if [ -n "$previous" ]; then
@@ -483,7 +515,10 @@ jobs:
     # changelog entry, which is why it is worth gating at all.
     - name: Check the PR description
       id: description
-      if: github.event_name == 'pull_request' && steps.human_approval.outputs.found != 'true' && steps.dependency_only.outputs.match != 'true' && steps.content_changed.outputs.skip != 'true'
+      # dependency_only and content_changed never run on a manual dispatch,
+      # so their guards pass vacuously there and the description is checked
+      # in full.
+      if: (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && steps.human_approval.outputs.found != 'true' && steps.dependency_only.outputs.match != 'true' && steps.content_changed.outputs.skip != 'true'
       env:
         REQUIRE_SECTION: ${{ inputs.require-description-section }}
       run: |
@@ -600,7 +635,7 @@ jobs:
       if: steps.content_changed.outputs.skip == 'true'
       env:
         GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_NUMBER: ${{ env.PR_NUMBER }}
         REPO: ${{ github.repository }}
         PREVIOUS_STATE: ${{ steps.content_changed.outputs.previous_state }}
         FINGERPRINT: ${{ steps.content_changed.outputs.fingerprint }}
@@ -1082,7 +1117,7 @@ jobs:
       if: success() && steps.description.outputs.count != '' && steps.description.outputs.count != '0'
       env:
         GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_NUMBER: ${{ env.PR_NUMBER }}
         REPO: ${{ github.repository }}
         COUNT: ${{ steps.description.outputs.count }}
       run: |
@@ -1125,7 +1160,7 @@ jobs:
       shell: bash
       env:
         GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_NUMBER: ${{ env.PR_NUMBER }}
         REPO: ${{ github.repository }}
       run: |
         set -uo pipefail
