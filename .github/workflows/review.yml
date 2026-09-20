@@ -320,6 +320,14 @@ jobs:
             git fetch --quiet --unshallow 2>/dev/null || git fetch --quiet --deepen=2000 2>/dev/null || true
             git fetch --quiet origin "$BASE_SHA" 2>/dev/null || true
             git diff "$BASE_SHA" "$HEAD_SHA" > .review-context/diff.patch
+          elif grep -q "terminal escape sequences" .review-context/diff.err ; then
+            # gh refuses to print a diff that holds escape characters, which
+            # a test asserting terminal output legitimately does. The diff goes
+            # to a file the reviewer reads, so take it, with each escape shown
+            # as the visible control picture rather than as the raw byte.
+            echo "diff holds escape characters; fetching it with them shown as control pictures"
+            gh pr diff "$PR_NUMBER" --repo "$REPO" --allow-escape-sequences \
+              | sed 's/\x1b/␛/g' > .review-context/diff.patch
           else
             cat .review-context/diff.err >&2
             exit 1
