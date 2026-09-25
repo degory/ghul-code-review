@@ -32,8 +32,12 @@ Three gates run before the model is ever started, in this order. Each is a
 whole run's cost avoided, and none of them leaves the PR without a review.
 
 - **A human has approved.** See 'Human override' below.
-- **A mechanical dependency-only bot PR.** Version-pin files only, from
-  Renovate or Dependabot; approved directly.
+- **A mechanical dependency-only bot PR.** From Renovate or Dependabot,
+  touching version-pin files only, and changing nothing in them but version
+  numbers and content hashes: every changed line has to be a changed line of
+  the same shape, so an added dependency or an added build step goes to the
+  full review. Approved directly. A caller turns this off with
+  `dependency-fast-path: false`.
 - **The reviewed content has not changed since the last review.** A rebase, a
   merge from the base branch, or a force-push that only rewrites history
   produces the same diff, and the last review already covers it — so that
@@ -364,6 +368,8 @@ history regardless but the PR will still need a fresh approval to merge.
 | `gh-app-id` | `""` | GitHub App id. With `gh-app-private-key`, the review posts under that App's installation identity instead of `github-actions[bot]`. |
 | `ghul-reference` | `false` | Fetch `GHUL.md` from `ghul-lang/ghul` main into the workspace root, for repos whose diffs contain ghūl source. |
 | `style-reference` | `false` | Fetch `STYLE.md` from `ghul-lang/ghul-style` main into the workspace root, for repos carrying human-facing prose or example code. Needs `gh-app-id`, and `ghul-style` in `extra-repositories`. |
+| `dependency-fast-path` | `true` | Approve a dependency bot's version-only change without running the model (see 'When the model is not run'). Turn off for a repo that judges its own bumps or wants every change read. |
+| `maintainer-review` | `false` | Let the review brief name changes that need the maintainer: such a change gets a request-changes review saying so, never an approval, however routine it looks. Off, the prompt says nothing about it, so no other repo's review holds a PR that way. |
 | `extra-repositories` | `""` | Additional repository names (same owner) the App token should reach, for prompts that read a file from a sibling repo. The calling repository is always included. |
 
 ## Secrets
