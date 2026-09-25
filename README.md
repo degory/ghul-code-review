@@ -255,7 +255,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: degory/ghul-code-review/.github/workflows/review.yml@v11
+    uses: ghul-lang/ghul-code-review/.github/workflows/review.yml@v11
     with:
       prompt: |
         Review pull request #${{ github.event.pull_request.number }} on ${{ github.repository }}.
@@ -362,8 +362,8 @@ history regardless but the PR will still need a fresh approval to merge.
 | `claude-version` | `2.1.221` | Claude CLI version installed on the runner. |
 | `job-timeout-minutes` | `8` | Outer cap on the whole job. A backstop for a wedged run, not the working budget — a run that reaches it is killed and posts nothing, because the salvage step never runs. |
 | `gh-app-id` | `""` | GitHub App id. With `gh-app-private-key`, the review posts under that App's installation identity instead of `github-actions[bot]`. |
-| `ghul-reference` | `false` | Fetch `GHUL.md` from `degory/ghul` main into the workspace root, for repos whose diffs contain ghūl source. |
-| `style-reference` | `false` | Fetch `STYLE.md` from `degory/ghul-style` main into the workspace root, for repos carrying human-facing prose or example code. Needs `gh-app-id`, and `ghul-style` in `extra-repositories`. |
+| `ghul-reference` | `false` | Fetch `GHUL.md` from `ghul-lang/ghul` main into the workspace root, for repos whose diffs contain ghūl source. |
+| `style-reference` | `false` | Fetch `STYLE.md` from `ghul-lang/ghul-style` main into the workspace root, for repos carrying human-facing prose or example code. Needs `gh-app-id`, and `ghul-style` in `extra-repositories`. |
 | `extra-repositories` | `""` | Additional repository names (same owner) the App token should reach, for prompts that read a file from a sibling repo. The calling repository is always included. |
 
 ## Secrets

@@ -31,7 +31,7 @@ name: Code review
 #   jobs:
 #     code_review:
 #       if: ${{ github.event_name == 'pull_request' }}
-#       uses: degory/ghul-code-review/.github/workflows/review.yml@v4
+#       uses: ghul-lang/ghul-code-review/.github/workflows/review.yml@v4
 #       with:
 #         prompt: |
 #           Review pull request #${{ github.event.pull_request.number }} ...
@@ -169,11 +169,11 @@ on:
         type: boolean
         default: true
       ghul-reference:
-        description: "Fetch GHUL.md from degory/ghul main into the workspace root, for repos whose diffs contain ghūl source. The prompt can then point the review at it."
+        description: "Fetch GHUL.md from ghul-lang/ghul main into the workspace root, for repos whose diffs contain ghūl source. The prompt can then point the review at it."
         type: boolean
         default: false
       style-reference:
-        description: "Fetch STYLE.md from degory/ghul-style main into the workspace root, for repos whose diffs carry human-facing prose or example code. Requires gh-app-id, and ghul-style named in extra-repositories."
+        description: "Fetch STYLE.md from ghul-lang/ghul-style main into the workspace root, for repos whose diffs carry human-facing prose or example code. Requires gh-app-id, and ghul-style named in extra-repositories."
         type: boolean
         default: false
       extra-repositories:
@@ -261,7 +261,7 @@ jobs:
 
     - name: Fetch GHUL.md language reference
       if: ${{ inputs.ghul-reference }}
-      run: curl -fsSL https://raw.githubusercontent.com/degory/ghul/main/GHUL.md -o GHUL.md
+      run: curl -fsSL https://raw.githubusercontent.com/ghul-lang/ghul/main/GHUL.md -o GHUL.md
 
     # ghul-style is private, so this needs the App token widened to reach it.
     # Doing it here rather than from the prompt because the CLI's write guard
@@ -271,7 +271,7 @@ jobs:
       env:
         GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
       run: |
-        gh api repos/degory/ghul-style/contents/STYLE.md -H "Accept: application/vnd.github.raw" > STYLE.md
+        gh api repos/ghul-lang/ghul-style/contents/STYLE.md -H "Accept: application/vnd.github.raw" > STYLE.md
 
     - name: Pre-fetch PR context
       if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
@@ -398,7 +398,7 @@ jobs:
     # A pins-only PR from a dependency bot is approved here directly rather
     # than by the model. Detection is a heuristic (author + branch prefix,
     # plus a PR-description marker for Renovate), not proof - see
-    # degory/ghul#2006. Any file outside the allowlist below falls through
+    # ghul-lang/ghul#2006. Any file outside the allowlist below falls through
     # to the full review as normal.
     - name: Check for a mechanical dependency-only change
       id: dependency_only
@@ -703,7 +703,7 @@ jobs:
         # fetch works because this repo is public - editing fleet.json on
         # main and pushing is the single switch that moves every consumer
         # repo's next review run, with no per-repo commit or variable.
-        FLEET_JSON=$(curl -fsSL --max-time 10 https://raw.githubusercontent.com/degory/ghul-code-review/main/fleet.json 2>/dev/null || true)
+        FLEET_JSON=$(curl -fsSL --max-time 10 https://raw.githubusercontent.com/ghul-lang/ghul-code-review/main/fleet.json 2>/dev/null || true)
         if [ -z "$FLEET_JSON" ] || ! echo "$FLEET_JSON" | jq -e . >/dev/null 2>&1; then
           echo "::warning::could not fetch or parse fleet.json - falling back to this workflow's own built-in defaults"
           FLEET_JSON='{}'
