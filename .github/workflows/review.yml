@@ -160,6 +160,23 @@ on:
         description: "Optional GitHub App id. When supplied alongside gh-app-private-key, the review posts under this App's installation identity instead of github-actions[bot]."
         type: string
         default: ""
+      dependency-fast-path:
+        description: >-
+          Approve a pull request from a dependency bot without running the
+          model, when it touches only version-pin files and changes nothing in
+          them but versions and hashes. Turn off for a repo that judges its own
+          dependency bumps, or that wants every change read.
+        type: boolean
+        default: true
+      maintainer-review:
+        description: >-
+          Let the review brief name changes that need the maintainer. With this
+          set, such a change gets a request-changes review saying so instead of
+          an approval, however routine it looks, and branch protection holds it
+          for the maintainer. Off by default, so no other repository's review
+          ever holds a pull request that way.
+        type: boolean
+        default: false
       require-description-section:
         description: >-
           Require the PR description to carry at least one 'Enhancements:' /
@@ -402,7 +419,7 @@ jobs:
     # to the full review as normal.
     - name: Check for a mechanical dependency-only change
       id: dependency_only
-      if: github.event_name == 'pull_request' && steps.human_approval.outputs.found != 'true'
+      if: github.event_name == 'pull_request' && steps.human_approval.outputs.found != 'true' && inputs.dependency-fast-path
       run: |
         set -euo pipefail
 
@@ -442,7 +459,38 @@ jobs:
           fi
         done < <(jq -r '.files[].path' .review-context/pr.json)
 
-        if [ "$looks_like_dependency_bot" = "true" ] && [ "$only_pins" = "true" ]; then
+        # A pin file can carry anything a dependency bot did not write, so
+        # the file names are not enough: every changed line has to be a
+        # changed line of the same shape, differing only in version numbers
+        # and content hashes. An added or removed line - a new dependency, a
+        # new RUN step - sends the change to the full review.
+        versions_only=true
+        if ! perl -ne '
+            sub norm {
+                my $s = shift;
+                $s =~ s/sha(?:1|256|384|512)[-:][0-9A-Za-z+\/=]+/H/g;
+                $s =~ s/\b[0-9a-f]{40,}\b/H/g;
+                $s =~ s/\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.-]+)?/V/g;
+                return $s;
+            }
+            sub flush {
+                if (join("\0", @r) ne join("\0", @a)) {
+                    print "::notice::$file changes more than versions\n";
+                    $bad = 1;
+                }
+                @r = (); @a = ();
+            }
+            if (/^diff --git a\/(\S+)/) { flush(); $file = $1; next }
+            next if /^(?:---|\+\+\+) /;
+            if (/^-(.*)/s) { push @r, norm($1); next }
+            if (/^\+(.*)/s) { push @a, norm($1); next }
+            flush();
+            END { flush(); exit($bad ? 1 : 0) }
+        ' .review-context/diff.patch; then
+          versions_only=false
+        fi
+
+        if [ "$looks_like_dependency_bot" = "true" ] && [ "$only_pins" = "true" ] && [ "$versions_only" = "true" ]; then
           echo "match=true" >> "$GITHUB_OUTPUT"
           echo "::notice::mechanical dependency-only bot PR (pins/version files only) — approving without a full review"
         else
@@ -456,7 +504,7 @@ jobs:
       run: |
         set -euo pipefail
         gh pr review "${{ env.PR_NUMBER }}" --repo "${{ github.repository }}" \
-          --approve --body "**Not reviewed** - mechanical dependency-only update: version-pin files only, from a dependency bot, so the model was not run.
+          --approve --body "**Not reviewed** - mechanical dependency-only update: versions and hashes changed in version-pin files only, from a dependency bot, so the model was not run.
 
         CI is the gate for whether the bump itself is safe. A source-touching commit on this pull request routes back through the full review automatically."
 
@@ -795,6 +843,7 @@ jobs:
         # Carried into the review body so a later run can tell that the
         # content it is looking at has already been reviewed.
         CONTENT_FINGERPRINT: ${{ steps.content_changed.outputs.fingerprint }}
+        MAINTAINER_REVIEW: ${{ inputs.maintainer-review }}
       run: |
         set -uo pipefail
 
@@ -1020,6 +1069,15 @@ jobs:
         Versioning:
         - Default is patch. A non-patch release is cut by raising the VERSION file in the PR; '#minor'/'#major' markers in the PR body are no-ops, so do not suggest adding them. A workflow_dispatch version input overrides outright, for emergencies.
         - Flag both directions: a breaking change going out without raising VERSION to a major, new public API without raising it to a minor, and a VERSION raise the change does not merit. What counts as breaking for this particular repo is in its review brief."
+
+        if [ "$MAINTAINER_REVIEW" = "true" ]; then
+          FULL_PROMPT="$FULL_PROMPT
+
+        Changes that need the maintainer:
+        - This repository's review brief names changes that need the maintainer's own review. For such a change, post REQUEST_CHANGES with one finding that names the area and says the change needs the maintainer's review. Do not approve it, however clean or routine it looks.
+        - That finding is exempt from the 80 bar and from the rule that a routine mechanical change is approved. It is not a judgement that the change is wrong: it is the correct outcome, and branch protection then holds the pull request until the maintainer has read it.
+        - When you are unsure whether a change touches one of those areas, treat it as touching it."
+        fi
 
         for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
           echo "::group::Attempt ${attempt}/${MAX_ATTEMPTS}"
